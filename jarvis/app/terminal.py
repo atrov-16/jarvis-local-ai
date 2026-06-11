@@ -9,6 +9,7 @@ import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from jarvis.app.daemon import run_daemon
 from jarvis.config.manager import load_config
@@ -16,14 +17,32 @@ from jarvis.config.secrets import SecretManager
 
 app = typer.Typer(help="Jarvis local assistant.")
 config_app = typer.Typer(help="Configuration commands.")
+workspace_app = typer.Typer(help="Workspace management.")
+project_app = typer.Typer(help="Project management.")
 console = Console()
 
 
-def _auth_headers(secret_manager: SecretManager) -> dict[str, str]:
+def _get_api_client(config_path: Path | None = None) -> httpx.Client:
+    jarvis_config = load_config(config_path)
+    secret_manager = SecretManager()
+    base_url = f"http://{jarvis_config.server.host}:{jarvis_config.server.port}"
     token = secret_manager.get_api_token()
-    if token is None:
-        return {}
-    return {"Authorization": f"Bearer {token}"}
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.Client(base_url=base_url, headers=headers, timeout=10.0)
+
+
+def _handle_api_error(e: Exception) -> None:
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 401:
+            console.print(Panel("Unauthorized: Valid local API token required.", title="Error", style="red"))
+        elif e.response.status_code == 400:
+            console.print(Panel(f"Bad Request: {e.response.json().get('detail', 'Unknown error')}", title="Error", style="red"))
+        else:
+            console.print(Panel(f"API Error: {e.response.status_code} - {e.response.text}", title="Error", style="red"))
+    else:
+        console.print(Panel("Jarvis daemon is not reachable. Start it with `jarvis daemon`.", title="Error", style="red"))
 
 
 @app.command()
@@ -45,36 +64,179 @@ def status(
     ] = None,
 ) -> None:
     """Show daemon status."""
-    jarvis_config = load_config(config)
-    secret_manager = SecretManager()
-    base_url = f"http://{jarvis_config.server.host}:{jarvis_config.server.port}"
+    with _get_api_client(config) as client:
+        try:
+            resp_status = client.get("/v1/status")
+            resp_status.raise_for_status()
+            status_data = resp_status.json()
 
-    try:
-        response = httpx.get(
-            f"{base_url}/v1/status",
-            headers=_auth_headers(secret_manager),
-            timeout=5.0,
-        )
-    except httpx.HTTPError:
-        console.print(
-            Panel(
-                "Jarvis daemon is not reachable yet. Start it with `jarvis daemon`.",
-                title="Status",
-            )
-        )
-        return
+            resp_projects = client.get("/v1/projects")
+            resp_projects.raise_for_status()
+            projects = resp_projects.json()
 
-    if response.status_code == 401:
-        console.print(
-            Panel(
-                "Jarvis daemon requires a valid local API token. Set JARVIS_API_TOKEN.",
-                title="Status",
-            )
-        )
-        return
+            resp_current = client.get("/v1/projects/current")
+            resp_current.raise_for_status()
+            current_project_id = resp_current.json()["id"]
 
-    response.raise_for_status()
-    console.print_json(data=response.json())
+            resp_workspaces = client.get("/v1/workspaces")
+            resp_workspaces.raise_for_status()
+            workspaces = resp_workspaces.json()
+
+            current_project_name = "None"
+            if current_project_id:
+                for p in projects:
+                    if p["id"] == current_project_id:
+                        current_project_name = p["name"]
+                        break
+
+            table = Table(title="Jarvis Status", show_header=False)
+            table.add_row("Status", "[green]Online[/green]")
+            table.add_row("Version", status_data["version"])
+            table.add_row("Current Project", f"[cyan]{current_project_name}[/cyan]")
+            table.add_row("Projects", str(len(projects)))
+            table.add_row("Workspaces", str(len(workspaces)))
+            console.print(table)
+
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@workspace_app.command("add")
+def workspace_add(
+    path: str,
+    name: str = typer.Option(None, "--name", "-n", help="Optional name for the workspace."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Register a new workspace."""
+    if not name:
+        name = Path(path).name
+    
+    with _get_api_client(config) as client:
+        try:
+            resp = client.post("/v1/workspaces", json={"name": name, "path": path})
+            resp.raise_for_status()
+            console.print(f"[green]Registered workspace:[/green] {name} ({resp.json()['path']})")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@workspace_app.command("list")
+def workspace_list(config: Path | None = typer.Option(None, "--config", "-c")) -> None:
+    """List all registered workspaces."""
+    with _get_api_client(config) as client:
+        try:
+            resp = client.get("/v1/workspaces")
+            resp.raise_for_status()
+            workspaces = resp.json()
+
+            if not workspaces:
+                console.print("No workspaces registered.")
+                return
+
+            table = Table(title="Workspaces")
+            table.add_column("ID", style="dim")
+            table.add_column("Name", style="cyan")
+            table.add_column("Path")
+            table.add_column("Status")
+
+            for w in workspaces:
+                status_str = "[green]Enabled[/green]" if w["enabled"] else "[red]Disabled[/red]"
+                table.add_row(w["id"][:8], w["name"], w["path"], status_str)
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@workspace_app.command("remove")
+def workspace_remove(
+    workspace_id: str, config: Path | None = typer.Option(None, "--config", "-c")
+) -> None:
+    """Remove a workspace."""
+    with _get_api_client(config) as client:
+        try:
+            resp = client.delete(f"/v1/workspaces/{workspace_id}")
+            resp.raise_for_status()
+            console.print(f"[green]Removed workspace:[/green] {workspace_id}")
+        except Exception as e:
+            # Try to resolve by name if ID fails? (Future enhancement)
+            _handle_api_error(e)
+
+
+@project_app.command("create")
+def project_create(
+    name: str,
+    description: str = typer.Option(None, "--description", "-d"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Create a new project."""
+    with _get_api_client(config) as client:
+        try:
+            resp = client.post("/v1/projects", json={"name": name, "description": description})
+            resp.raise_for_status()
+            console.print(f"[green]Created project:[/green] {name}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@project_app.command("list")
+def project_list(config: Path | None = typer.Option(None, "--config", "-c")) -> None:
+    """List all projects."""
+    with _get_api_client(config) as client:
+        try:
+            resp_projects = client.get("/v1/projects")
+            resp_projects.raise_for_status()
+            projects = resp_projects.json()
+
+            resp_current = client.get("/v1/projects/current")
+            resp_current.raise_for_status()
+            current_id = resp_current.json()["id"]
+
+            if not projects:
+                console.print("No projects found.")
+                return
+
+            table = Table(title="Projects")
+            table.add_column("Current", justify="center")
+            table.add_column("ID", style="dim")
+            table.add_column("Name", style="cyan")
+            table.add_column("Status")
+
+            for p in projects:
+                is_current = "*" if p["id"] == current_id else ""
+                table.add_row(is_current, p["id"][:8], p["name"], p["status"])
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@project_app.command("switch")
+def project_switch(
+    name: str, config: Path | None = typer.Option(None, "--config", "-c")
+) -> None:
+    """Switch to a different project."""
+    with _get_api_client(config) as client:
+        try:
+            # Resolve name to ID
+            resp_projects = client.get("/v1/projects")
+            resp_projects.raise_for_status()
+            projects = resp_projects.json()
+
+            project_id = None
+            for p in projects:
+                if p["name"].lower() == name.lower() or p["id"].startswith(name):
+                    project_id = p["id"]
+                    name = p["name"]
+                    break
+            
+            if not project_id:
+                console.print(f"[red]Project not found:[/red] {name}")
+                return
+
+            resp = client.post("/v1/projects/current", json={"id": project_id})
+            resp.raise_for_status()
+            console.print(f"[green]Switched to project:[/green] {name}")
+        except Exception as e:
+            _handle_api_error(e)
 
 
 @config_app.command("show")
@@ -90,4 +252,6 @@ def config_show(
 
 
 app.add_typer(config_app, name="config")
+app.add_typer(workspace_app, name="workspace")
+app.add_typer(project_app, name="project")
 

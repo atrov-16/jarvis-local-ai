@@ -126,6 +126,36 @@ class WorkspaceRepository:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_by_path(self, path: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM workspaces WHERE path = ? COLLATE NOCASE", (path,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update(self, workspace_id: str, **kwargs: object) -> bool:
+        if not kwargs:
+            return False
+        
+        allowed_keys = {"name", "enabled", "read_policy", "write_policy"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        if not filtered_kwargs:
+            return False
+
+        if "enabled" in filtered_kwargs:
+            filtered_kwargs["enabled"] = 1 if filtered_kwargs["enabled"] else 0
+
+        set_clause = ", ".join([f"{k} = ?" for k in filtered_kwargs.keys()])
+        values = list(filtered_kwargs.values())
+        values.append(_now())
+        values.append(workspace_id)
+
+        cursor = await self._connection.execute(
+            f"UPDATE workspaces SET {set_clause}, updated_at = ? WHERE id = ?",
+            tuple(values),
+        )
+        return cursor.rowcount > 0
+
     async def delete(self, workspace_id: str) -> bool:
         cursor = await self._connection.execute(
             "DELETE FROM workspaces WHERE id = ?", (workspace_id,)
@@ -163,10 +193,37 @@ class ProjectRepository:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_by_name(self, name: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM projects WHERE name = ?", (name,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def list(self) -> list[dict[str, object]]:
         cursor = await self._connection.execute("SELECT * FROM projects")
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def update(self, project_id: str, **kwargs: object) -> bool:
+        if not kwargs:
+            return False
+        
+        allowed_keys = {"name", "description", "status"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        if not filtered_kwargs:
+            return False
+
+        set_clause = ", ".join([f"{k} = ?" for k in filtered_kwargs.keys()])
+        values = list(filtered_kwargs.values())
+        values.append(_now())
+        values.append(project_id)
+
+        cursor = await self._connection.execute(
+            f"UPDATE projects SET {set_clause}, updated_at = ? WHERE id = ?",
+            tuple(values),
+        )
+        return cursor.rowcount > 0
 
     async def delete(self, project_id: str) -> bool:
         cursor = await self._connection.execute(
@@ -179,6 +236,13 @@ class ProjectRepository:
             "INSERT INTO project_workspaces (project_id, workspace_id, created_at) VALUES (?, ?, ?)",
             (project_id, workspace_id, _now()),
         )
+
+    async def unlink_workspace(self, project_id: str, workspace_id: str) -> bool:
+        cursor = await self._connection.execute(
+            "DELETE FROM project_workspaces WHERE project_id = ? AND workspace_id = ?",
+            (project_id, workspace_id),
+        )
+        return cursor.rowcount > 0
 
     async def list_workspaces(self, project_id: str) -> list[dict[str, object]]:
         cursor = await self._connection.execute(
