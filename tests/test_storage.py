@@ -15,8 +15,29 @@ async def test_migrations_create_database_and_are_idempotent(tmp_path: Path) -> 
         applied_second = await run_migrations(connection)
 
     assert database_path.exists()
-    assert applied_first == [1]
+    assert applied_first == [1, 2]
     assert applied_second == []
+
+
+async def test_projects_and_workspaces_schema(tmp_path: Path) -> None:
+    database_path = tmp_path / "memory.sqlite"
+
+    async with sqlite_connection(database_path) as connection:
+        await run_migrations(connection)
+
+        # Verify tables exist
+        cursor = await connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('workspaces', 'projects', 'project_workspaces', 'project_notes', 'project_goals')"
+        )
+        tables = {row["name"] for row in await cursor.fetchall()}
+        assert tables == {
+            "workspaces",
+            "projects",
+            "project_workspaces",
+            "project_notes",
+            "project_goals",
+        }
 
 
 async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
