@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    path TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL UNIQUE COLLATE NOCASE,
     enabled INTEGER NOT NULL DEFAULT 1,
     read_policy TEXT NOT NULL DEFAULT 'auto_inside_workspace',
     write_policy TEXT NOT NULL DEFAULT 'approval_required',
@@ -26,9 +26,11 @@ CREATE TABLE IF NOT EXISTS project_workspaces (
     workspace_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (project_id, workspace_id),
-    FOREIGN KEY (project_id) REFERENCES projects(id),
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_project_workspaces_workspace_id ON project_workspaces(workspace_id);
 
 CREATE TABLE IF NOT EXISTS project_notes (
     id TEXT PRIMARY KEY,
@@ -37,8 +39,10 @@ CREATE TABLE IF NOT EXISTS project_notes (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_project_notes_project_id ON project_notes(project_id);
 
 CREATE TABLE IF NOT EXISTS project_goals (
     id TEXT PRIMARY KEY,
@@ -48,5 +52,7 @@ CREATE TABLE IF NOT EXISTS project_goals (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_project_goals_project_id ON project_goals(project_id);
