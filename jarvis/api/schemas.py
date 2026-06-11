@@ -5,6 +5,9 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+from jarvis.models.schemas import ProviderStatus
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str
@@ -16,6 +19,7 @@ class StatusResponse(BaseModel):
     version: str
     storage: dict[str, object] = Field(default_factory=dict)
     secrets: dict[str, bool] = Field(default_factory=dict)
+    providers: list[ProviderStatus] = Field(default_factory=list)
 
 
 class WorkspaceResponse(BaseModel):

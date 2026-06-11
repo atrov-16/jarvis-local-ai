@@ -25,6 +25,7 @@ from jarvis.config.manager import load_config
 from jarvis.config.models import JarvisConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
+from jarvis.models.router import ModelRouter
 from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
@@ -48,6 +49,7 @@ def create_app(
     uow = UnitOfWork(db_path)
     workspaces = WorkspaceRegistry(uow)
     projects = ProjectRegistry(uow)
+    model_router = ModelRouter(jarvis_config, secrets)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -65,6 +67,7 @@ def create_app(
     app.state.event_bus = bus
     app.state.workspaces = workspaces
     app.state.projects = projects
+    app.state.model_router = model_router
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -72,11 +75,13 @@ def create_app(
 
     @app.get("/v1/status", response_model=StatusResponse)
     async def status(_: None = Depends(require_api_token)) -> StatusResponse:
+        providers = await model_router.check_availability()
         return StatusResponse(
             status="ok",
             version=__version__,
             storage=app.state.storage_status,
             secrets=secrets.status(),
+            providers=providers,
         )
 
     @app.get("/v1/config/public")

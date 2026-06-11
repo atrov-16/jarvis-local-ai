@@ -14,13 +14,19 @@ from jarvis.models.schemas import (
 
 
 class FakeProvider(ModelProvider):
-    def __init__(self, available: bool = True, raise_on_complete: Exception | None = None) -> None:
+    def __init__(
+        self, 
+        name: str = "fake", 
+        available: bool = True, 
+        raise_on_complete: Exception | None = None
+    ) -> None:
+        self._name = name
         self._available = available
         self._raise_on_complete = raise_on_complete
 
     @property
     def name(self) -> str:
-        return "fake"
+        return self._name
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         if self._raise_on_complete:
