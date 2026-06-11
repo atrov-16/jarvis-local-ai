@@ -95,6 +95,12 @@ def status(
             table.add_row("Current Project", f"[cyan]{current_project_name}[/cyan]")
             table.add_row("Projects", str(len(projects)))
             table.add_row("Workspaces", str(len(workspaces)))
+            
+            # Providers
+            for p in status_data.get("providers", []):
+                p_status = "[green]Ready[/green]" if p["available"] else f"[red]Error: {p['error']}[/red]"
+                table.add_row(f"Provider: {p['name']}", p_status)
+                
             console.print(table)
 
         except Exception as e:

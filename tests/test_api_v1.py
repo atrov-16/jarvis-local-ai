@@ -106,3 +106,33 @@ def test_workspace_linking(client: TestClient, tmp_path: Path) -> None:
     resp = client.delete(f"/v1/projects/{p_id}/workspaces/{w_id}", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["unlinked"] is True
+
+
+def test_status_includes_providers(client: TestClient) -> None:
+    headers = {"Authorization": "Bearer test-token"}
+    
+    # We need to patch the check_availability on the instance stored in app.state
+    from unittest.mock import AsyncMock, patch
+    from jarvis.models.schemas import ProviderStatus
+
+    mock_statuses = [
+        ProviderStatus(name="openrouter", available=True),
+        ProviderStatus(name="ollama", available=False, error="Connection refused"),
+    ]
+
+    # Access the app from the client
+    app = client.app # type: ignore
+    with patch.object(app.state.model_router, "check_availability", new_callable=AsyncMock) as mock_check:
+        mock_check.return_value = mock_statuses
+        
+        resp = client.get("/v1/status", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        
+        assert "providers" in data
+        assert len(data["providers"]) == 2
+        
+        providers = {p["name"]: p for p in data["providers"]}
+        assert providers["openrouter"]["available"] is True
+        assert providers["ollama"]["available"] is False
+        assert "Connection refused" in providers["ollama"]["error"]
