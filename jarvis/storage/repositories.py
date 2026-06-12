@@ -480,6 +480,185 @@ class MemoryRepository:
         return cursor.rowcount > 0
 
 
+class TaskRepository:
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def insert(
+        self,
+        *,
+        id: str | None = None,
+        parent_task_id: str | None = None,
+        project_id: str | None = None,
+        title: str,
+        user_request: str,
+        status: str = "queued",
+        priority: int = 100,
+        metadata: dict[str, object] | None = None,
+        claimed_at: str | None = None,
+    ) -> str:
+        task_id = id or str(uuid4())
+        now = _now()
+        await self._connection.execute(
+            """
+            INSERT INTO tasks (
+                id, parent_task_id, project_id, title, user_request, 
+                status, priority, metadata_json, created_at, updated_at, claimed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                parent_task_id,
+                project_id,
+                title,
+                user_request,
+                status,
+                priority,
+                json.dumps(metadata or {}),
+                now,
+                now,
+                claimed_at,
+            ),
+        )
+        return task_id
+
+    async def get(self, task_id: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = await cursor.fetchone()
+        if row:
+            data = dict(row)
+            data["metadata"] = json.loads(str(data.pop("metadata_json")))
+            return data
+        return None
+
+    async def update(self, task_id: str, **kwargs: object) -> bool:
+        if not kwargs:
+            return False
+        
+        allowed_keys = {"status", "title", "priority", "metadata_json", "started_at", "completed_at", "claimed_at"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        if not filtered_kwargs:
+            return False
+
+        set_clause = ", ".join([f"{k} = ?" for k in filtered_kwargs.keys()])
+        values = list(filtered_kwargs.values())
+        values.append(_now())
+        values.append(task_id)
+
+        cursor = await self._connection.execute(
+            f"UPDATE tasks SET {set_clause}, updated_at = ? WHERE id = ?",
+            tuple(values),
+        )
+        return cursor.rowcount > 0
+
+    async def insert_step(
+        self,
+        *,
+        id: str | None = None,
+        task_id: str,
+        step_index: int,
+        title: str,
+        description: str | None = None,
+        tool_name: str | None = None,
+        input_json: str | None = None,
+        status: str = "pending",
+        requires_approval: bool = False,
+    ) -> str:
+        step_id = id or str(uuid4())
+        now = _now()
+        await self._connection.execute(
+            """
+            INSERT INTO task_steps (
+                id, task_id, step_index, title, description, tool_name, 
+                input_json, status, requires_approval, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                step_id,
+                task_id,
+                step_index,
+                title,
+                description,
+                tool_name,
+                input_json,
+                status,
+                1 if requires_approval else 0,
+                now,
+                now,
+            ),
+        )
+        return step_id
+
+    async def get_step(self, step_id: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute("SELECT * FROM task_steps WHERE id = ?", (step_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_steps(self, task_id: str) -> list[dict[str, object]]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_index ASC", (task_id,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def update_step(self, step_id: str, **kwargs: object) -> bool:
+        if not kwargs:
+            return False
+        
+        allowed_keys = {"status", "output_json", "error", "attempt_count"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        if not filtered_kwargs:
+            return False
+
+        set_clause = ", ".join([f"{k} = ?" for k in filtered_kwargs.keys()])
+        values = list(filtered_kwargs.values())
+        values.append(_now())
+        values.append(step_id)
+
+        cursor = await self._connection.execute(
+            f"UPDATE task_steps SET {set_clause}, updated_at = ? WHERE id = ?",
+            tuple(values),
+        )
+        return cursor.rowcount > 0
+
+    async def insert_event(
+        self,
+        *,
+        id: str | None = None,
+        task_id: str,
+        step_id: str | None = None,
+        event_type: str,
+        message: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> str:
+        event_id = id or str(uuid4())
+        await self._connection.execute(
+            """
+            INSERT INTO task_events (id, task_id, step_id, event_type, message, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                task_id,
+                step_id,
+                event_type,
+                message,
+                json.dumps(payload or {}),
+                _now(),
+            ),
+        )
+        return event_id
+
+    async def list_events(self, task_id: str) -> list[dict[str, object]]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC", (task_id,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 class StorageRepositories:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self.app_state = AppStateRepository(connection)
@@ -487,6 +666,7 @@ class StorageRepositories:
         self.workspaces = WorkspaceRepository(connection)
         self.projects = ProjectRepository(connection)
         self.memory = MemoryRepository(connection)
+        self.tasks = TaskRepository(connection)
 
 
 def _now() -> str:

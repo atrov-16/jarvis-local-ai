@@ -28,7 +28,7 @@ async def test_propose_and_approve(memory_store, uow):
     assert proposal_id is not None
     
     # Verify audit log for proposal
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute("SELECT * FROM audit_log WHERE target = ?", (proposal_id,))
         audit = await cursor.fetchone()
         assert audit["action_type"] == "memory.propose"
@@ -44,7 +44,7 @@ async def test_propose_and_approve(memory_store, uow):
     assert results[0].title == "Language Fact"
     
     # Verify audit log for approval
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute("SELECT * FROM audit_log WHERE action_type = 'memory.approve'")
         audit = await cursor.fetchone()
         assert audit["target"] == memory_id
@@ -60,7 +60,7 @@ async def test_deny_proposal(memory_store, uow):
     assert success is True
     
     # Verify status in DB
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute("SELECT status FROM memory_proposals WHERE id = ?", (proposal_id,))
         row = await cursor.fetchone()
         assert row["status"] == "denied"
@@ -84,7 +84,7 @@ async def test_delete_memory(memory_store, uow):
     assert len(results) == 0
     
     # Verify audit
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute("SELECT * FROM audit_log WHERE action_type = 'memory.delete'")
         audit = await cursor.fetchone()
         assert audit["target"] == mid
@@ -92,7 +92,7 @@ async def test_delete_memory(memory_store, uow):
 async def test_search_structure(memory_store):
     await memory_store.propose(memory_type="fact", proposed_content="Structured search", reason="Test")
     # Need to approve to be searchable
-    async with memory_store._uow as unit:
+    async with memory_store._uow.begin() as unit:
         proposals = await unit.repositories.memory._connection.execute("SELECT id FROM memory_proposals")
         row = await proposals.fetchone()
         pid = row[0]

@@ -12,7 +12,7 @@ class ProjectRegistry:
         self._uow = uow
 
     async def create(self, name: str, description: str | None = None) -> str:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             project_id = await unit.repositories.projects.insert(
                 name=name, description=description
@@ -26,22 +26,22 @@ class ProjectRegistry:
             return project_id
 
     async def list(self) -> list[dict[str, object]]:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.projects.list()
 
     async def get(self, project_id: str) -> dict[str, object] | None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.projects.get(project_id)
 
     async def get_by_name(self, name: str) -> dict[str, object] | None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.projects.get_by_name(name)
 
     async def update(self, project_id: str, **kwargs: object) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             project = await unit.repositories.projects.get(project_id)
             if not project:
@@ -59,7 +59,7 @@ class ProjectRegistry:
             return updated
 
     async def delete(self, project_id: str) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             project = await unit.repositories.projects.get(project_id)
             if not project:
@@ -86,13 +86,13 @@ class ProjectRegistry:
             return deleted
 
     async def get_current_id(self) -> str | None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             state = await unit.repositories.app_state.get(CURRENT_PROJECT_KEY)
             return str(state["id"]) if state and "id" in state else None
 
     async def switch_current(self, project_id: str | None) -> None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             if project_id:
                 project = await unit.repositories.projects.get(project_id)
@@ -115,7 +115,7 @@ class ProjectRegistry:
                 )
 
     async def link_workspace(self, project_id: str, workspace_id: str) -> None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             await unit.repositories.projects.link_workspace(project_id, workspace_id)
             await unit.repositories.audit.insert(
@@ -127,7 +127,7 @@ class ProjectRegistry:
             )
 
     async def unlink_workspace(self, project_id: str, workspace_id: str) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             unlinked = await unit.repositories.projects.unlink_workspace(project_id, workspace_id)
             if unlinked:

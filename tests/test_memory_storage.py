@@ -13,7 +13,7 @@ async def uow(tmp_path):
     return UnitOfWork(db_path)
 
 async def test_short_term_context(uow):
-    async with uow as unit:
+    async with uow.begin() as unit:
         memory_id = await unit.repositories.memory.insert_short_term(
             source="test",
             role="user",
@@ -30,7 +30,7 @@ async def test_short_term_context(uow):
         assert "greeting" in row["tags_json"]
 
 async def test_long_term_memory_lifecycle(uow):
-    async with uow as unit:
+    async with uow.begin() as unit:
         # 1. Propose
         proposal_id = await unit.repositories.memory.propose_long_term(
             memory_type="fact",
@@ -65,7 +65,7 @@ async def test_long_term_memory_lifecycle(uow):
         assert memory["title"] == "Sky Color"
 
 async def test_fts5_search(uow):
-    async with uow as unit:
+    async with uow.begin() as unit:
         await unit.repositories.memory.insert_long_term(
             memory_type="fact",
             title="FastAPI Guide",
@@ -95,7 +95,7 @@ async def test_fts5_search(uow):
         assert results[0]["title"] == "FastAPI Guide"
 
 async def test_search_filtering(uow):
-    async with uow as unit:
+    async with uow.begin() as unit:
         p1 = await unit.repositories.projects.insert(name="Project A")
         p2 = await unit.repositories.projects.insert(name="Project B")
         
@@ -118,7 +118,7 @@ async def test_search_filtering(uow):
         assert results[0]["project_id"] == p1
 
 async def test_memory_deletion_syncs_fts(uow):
-    async with uow as unit:
+    async with uow.begin() as unit:
         memory_id = await unit.repositories.memory.insert_long_term(
             memory_type="note",
             content="Temporary note",

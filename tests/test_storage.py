@@ -15,7 +15,7 @@ async def test_migrations_create_database_and_are_idempotent(tmp_path: Path) -> 
         applied_second = await run_migrations(connection)
 
     assert database_path.exists()
-    assert applied_first == [1, 2, 3]
+    assert applied_first == [1, 2, 3, 4, 5]
     assert applied_second == []
 
 async def test_projects_and_workspaces_schema(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ async def test_cascading_deletes(tmp_path: Path) -> None:
 async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
     database_path = tmp_path / "memory.sqlite"
 
-    async with UnitOfWork(database_path) as unit:
+    async with UnitOfWork(database_path).begin() as unit:
         assert unit.repositories is not None
         await unit.repositories.app_state.set("current_project_id", {"id": "project-1"})
         audit_id = await unit.repositories.audit.insert(
@@ -117,7 +117,7 @@ async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
             details={"ok": True},
         )
 
-    async with UnitOfWork(database_path) as unit:
+    async with UnitOfWork(database_path).begin() as unit:
         assert unit.repositories is not None
         value = await unit.repositories.app_state.get("current_project_id")
 
@@ -128,7 +128,7 @@ async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
 async def test_workspace_and_project_repositories(tmp_path: Path) -> None:
     database_path = tmp_path / "memory.sqlite"
 
-    async with UnitOfWork(database_path) as unit:
+    async with UnitOfWork(database_path).begin() as unit:
         assert unit.repositories is not None
         repo_w = unit.repositories.workspaces
         repo_p = unit.repositories.projects

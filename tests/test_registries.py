@@ -23,7 +23,7 @@ async def test_workspace_registry(uow: UnitOfWork) -> None:
     assert workspaces[0]["name"] == "Test Workspace"
     
     # Verify audit log
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute("SELECT action_type FROM audit_log WHERE target = ?", (w_id,))
         row = await cursor.fetchone()
         assert row["action_type"] == "workspace.add"
@@ -95,7 +95,7 @@ async def test_project_registry_hardening(uow: UnitOfWork) -> None:
     # Unlink
     await registry.link_workspace(p_id, w_id)
     assert await registry.unlink_workspace(p_id, w_id) is True
-    async with uow as unit:
+    async with uow.begin() as unit:
         assert len(await unit.repositories.projects.list_workspaces(p_id)) == 0
 
 
@@ -113,7 +113,7 @@ async def test_project_delete_safety(uow: UnitOfWork) -> None:
     assert await registry.get_current_id() is None
     
     # Verify audit log for the clear
-    async with uow as unit:
+    async with uow.begin() as unit:
         cursor = await unit.connection.execute(
             "SELECT summary FROM audit_log WHERE action_type = 'project.switch' ORDER BY created_at DESC LIMIT 1"
         )
