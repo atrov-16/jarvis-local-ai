@@ -19,6 +19,7 @@ app = typer.Typer(help="Jarvis local assistant.")
 config_app = typer.Typer(help="Configuration commands.")
 workspace_app = typer.Typer(help="Workspace management.")
 project_app = typer.Typer(help="Project management.")
+memory_app = typer.Typer(help="Memory management.")
 console = Console()
 
 
@@ -257,7 +258,189 @@ def config_show(
     console.print_json(data=jarvis_config.public_dict())
 
 
+@memory_app.command("search")
+def memory_search(
+    query: str,
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project name or ID."),
+    limit: int = typer.Option(20, "--limit", "-l"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Search long-term memory."""
+    with _get_api_client(config) as client:
+        try:
+            params = {"q": query, "limit": limit}
+            if project:
+                # Resolve project name to ID if needed
+                resp_projects = client.get("/v1/projects")
+                resp_projects.raise_for_status()
+                for p in resp_projects.json():
+                    if p["name"].lower() == project.lower() or p["id"].startswith(project):
+                        params["project_id"] = p["id"]
+                        break
+
+            resp = client.get("/v1/memory/search", params=params)
+            resp.raise_for_status()
+            results = resp.json()
+
+            if not results:
+                console.print(f"No memories found matching: [bold]{query}[/bold]")
+                return
+
+            table = Table(title=f"Memory Search: {query}")
+            table.add_column("Score", justify="right", style="dim")
+            table.add_column("Type", style="cyan")
+            table.add_column("Title/Content")
+            
+            for r in results:
+                title = r["title"] or ""
+                content = r["content"]
+                display = f"[bold]{title}[/bold]\n{content}" if title else content
+                table.add_row(f"{r['relevance_score']:.2f}", r["memory_type"], display)
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@memory_app.command("proposals")
+def memory_proposals(config: Path | None = typer.Option(None, "--config", "-c")) -> None:
+    """List pending memory proposals."""
+    with _get_api_client(config) as client:
+        try:
+            resp = client.get("/v1/memory/proposals")
+            resp.raise_for_status()
+            proposals = resp.json()
+
+            if not proposals:
+                console.print("No pending memory proposals.")
+                return
+
+            table = Table(title="Pending Memory Proposals")
+            table.add_column("ID", style="dim")
+            table.add_column("Type", style="cyan")
+            table.add_column("Proposed Content")
+            table.add_column("Reason", style="italic")
+
+            for p in proposals:
+                table.add_row(p["id"][:8], p["memory_type"], p["proposed_content"], p["reason"])
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@memory_app.command("approve")
+def memory_approve(
+    proposal_id: str,
+    title: str = typer.Option(None, "--title", "-t", help="Optional title for the memory."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Approve a memory proposal."""
+    with _get_api_client(config) as client:
+        try:
+            # Try to resolve short ID
+            if len(proposal_id) < 36:
+                resp_p = client.get("/v1/memory/proposals")
+                resp_p.raise_for_status()
+                for p in resp_p.json():
+                    if p["id"].startswith(proposal_id):
+                        proposal_id = p["id"]
+                        break
+
+            resp = client.post(f"/v1/memory/proposals/{proposal_id}/approve", json={"title": title})
+            resp.raise_for_status()
+            console.print(f"[green]Approved memory proposal:[/green] {proposal_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@memory_app.command("deny")
+def memory_deny(
+    proposal_id: str,
+    reason: str = typer.Option(None, "--reason", "-r"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Deny a memory proposal."""
+    with _get_api_client(config) as client:
+        try:
+            # Try to resolve short ID
+            if len(proposal_id) < 36:
+                resp_p = client.get("/v1/memory/proposals")
+                resp_p.raise_for_status()
+                for p in resp_p.json():
+                    if p["id"].startswith(proposal_id):
+                        proposal_id = p["id"]
+                        break
+
+            resp = client.post(f"/v1/memory/proposals/{proposal_id}/deny", json={"reason": reason})
+            resp.raise_for_status()
+            console.print(f"[green]Denied memory proposal:[/green] {proposal_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@memory_app.command("list")
+def memory_list(
+    project: str = typer.Option(None, "--project", "-p"),
+    limit: int = typer.Option(50, "--limit", "-l"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """List long-term memories."""
+    with _get_api_client(config) as client:
+        try:
+            params = {"limit": limit}
+            if project:
+                resp_projects = client.get("/v1/projects")
+                resp_projects.raise_for_status()
+                for p in resp_projects.json():
+                    if p["name"].lower() == project.lower() or p["id"].startswith(project):
+                        params["project_id"] = p["id"]
+                        break
+
+            resp = client.get("/v1/memory/long-term", params=params)
+            resp.raise_for_status()
+            memories = resp.json()
+
+            if not memories:
+                console.print("No long-term memories found.")
+                return
+
+            table = Table(title="Long-Term Memories")
+            table.add_column("ID", style="dim")
+            table.add_column("Type", style="cyan")
+            table.add_column("Title")
+            table.add_column("Content", max_width=60)
+
+            for m in memories:
+                table.add_row(m["id"][:8], m["memory_type"], m["title"] or "", m["content"])
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@memory_app.command("remove")
+def memory_remove(
+    memory_id: str, config: Path | None = typer.Option(None, "--config", "-c")
+) -> None:
+    """Remove a long-term memory."""
+    with _get_api_client(config) as client:
+        try:
+            # Try to resolve short ID
+            if len(memory_id) < 36:
+                resp_m = client.get("/v1/memory/long-term")
+                resp_m.raise_for_status()
+                for m in resp_m.json():
+                    if m["id"].startswith(memory_id):
+                        memory_id = m["id"]
+                        break
+
+            resp = client.delete(f"/v1/memory/long-term/{memory_id}")
+            resp.raise_for_status()
+            console.print(f"[green]Removed memory:[/green] {memory_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
 app.add_typer(config_app, name="config")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(project_app, name="project")
+app.add_typer(memory_app, name="memory")
 

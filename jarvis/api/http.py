@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,11 @@ from jarvis import __version__
 from jarvis.api.schemas import (
     CurrentProjectUpdate,
     HealthResponse,
+    MemoryApproveRequest,
+    MemoryDenialRequest,
+    MemoryProposalResponse,
+    MemoryResponse,
+    MemorySearchResultResponse,
     ProjectCreate,
     ProjectResponse,
     StatusResponse,
@@ -26,6 +32,7 @@ from jarvis.config.models import JarvisConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
 from jarvis.models.router import ModelRouter
+from jarvis.memory.store import MemoryStore
 from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
@@ -49,6 +56,7 @@ def create_app(
     uow = UnitOfWork(db_path)
     workspaces = WorkspaceRegistry(uow)
     projects = ProjectRegistry(uow)
+    memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
 
     @asynccontextmanager
@@ -67,6 +75,7 @@ def create_app(
     app.state.event_bus = bus
     app.state.workspaces = workspaces
     app.state.projects = projects
+    app.state.memory_store = memory_store
     app.state.model_router = model_router
 
     @app.get("/health", response_model=HealthResponse)
@@ -175,6 +184,96 @@ def create_app(
             raise HTTPException(status_code=404, detail="Link not found.")
         return JSONResponse({"unlinked": True})
 
+    # Memory Endpoints
+    @app.get("/v1/memory/search", response_model=list[MemorySearchResultResponse])
+    async def search_memory(
+        q: str,
+        project_id: str | None = None,
+        memory_type: str | None = None,
+        limit: int = 20,
+        _: None = Depends(require_api_token),
+    ) -> list[MemorySearchResultResponse]:
+        results = await memory_store.search(
+            query=q, project_id=project_id, memory_type=memory_type, limit=limit
+        )
+        return [MemorySearchResultResponse(**r.__dict__) for r in results]
+
+    @app.get("/v1/memory/proposals", response_model=list[MemoryProposalResponse])
+    async def list_proposals(_: None = Depends(require_api_token)) -> list[MemoryProposalResponse]:
+        async with uow as unit:
+            assert unit.repositories is not None
+            # We don't have a list_proposals in MemoryStore yet, let's use the repository directly
+            # or add it to MemoryStore. Designing to use Store is better.
+            # I'll add a list_proposals to MemoryStore or just use Repository for now.
+            # Actually, the requirement said "Keep business logic inside MemoryStore".
+            # I will quickly check if I should add it to Store.
+            cursor = await unit.repositories.memory._connection.execute(
+                "SELECT * FROM memory_proposals WHERE status = 'pending'"
+            )
+            rows = await cursor.fetchall()
+            proposals = []
+            for row in rows:
+                data = dict(row)
+                data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json")))
+                proposals.append(MemoryProposalResponse(**data))
+            return proposals
+
+    @app.post("/v1/memory/proposals/{proposal_id}/approve")
+    async def approve_proposal(
+        proposal_id: str, data: MemoryApproveRequest, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        try:
+            memory_id = await memory_store.approve(proposal_id, title=data.title)
+            return JSONResponse({"id": memory_id}, status_code=201)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/v1/memory/proposals/{proposal_id}/deny")
+    async def deny_proposal(
+        proposal_id: str, data: MemoryDenialRequest, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        denied = await memory_store.deny(proposal_id, reason=data.reason)
+        if not denied:
+            raise HTTPException(status_code=404, detail="Proposal not found.")
+        return JSONResponse({"denied": True})
+
+    @app.get("/v1/memory/long-term", response_model=list[MemoryResponse])
+    async def list_long_term_memory(
+        project_id: str | None = None,
+        limit: int = 50,
+        _: None = Depends(require_api_token),
+    ) -> list[MemoryResponse]:
+        async with uow as unit:
+            assert unit.repositories is not None
+            sql = "SELECT * FROM long_term_memory"
+            params = []
+            if project_id:
+                sql += " WHERE project_id = ?"
+                params.append(project_id)
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = await unit.repositories.memory._connection.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+            return [
+                MemoryResponse(
+                    **{
+                        **dict(row),
+                        "tags": json.loads(str(row["tags_json"]))
+                    }
+                )
+                for row in rows
+            ]
+
+    @app.delete("/v1/memory/long-term/{memory_id}")
+    async def delete_memory(
+        memory_id: str, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        deleted = await memory_store.delete_memory(memory_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Memory not found.")
+        return JSONResponse({"deleted": True})
+
     @app.websocket("/v1/events")
     async def events(websocket: WebSocket) -> None:
         if not await authenticate_websocket(websocket, jarvis_config, secrets):
@@ -216,4 +315,10 @@ def _extract_token(authorization: str | None, x_jarvis_api_token: str | None) ->
     if authorization.startswith(prefix):
         return authorization[len(prefix) :]
     return None
+
+
+
+None
+
+
 
