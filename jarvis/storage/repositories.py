@@ -295,12 +295,198 @@ class ProjectRepository:
         return [dict(row) for row in rows]
 
 
+class MemoryRepository:
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def insert_short_term(
+        self,
+        *,
+        id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        source: str,
+        role: str | None = None,
+        content: str,
+        tags: list[str] | None = None,
+        importance: int = 0,
+        expires_at: str | None = None,
+    ) -> str:
+        memory_id = id or str(uuid4())
+        await self._connection.execute(
+            """
+            INSERT INTO short_term_context (
+                id, project_id, task_id, source, role, content, tags_json, 
+                importance, expires_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                project_id,
+                task_id,
+                source,
+                role,
+                content,
+                json.dumps(tags or []),
+                importance,
+                expires_at,
+                _now(),
+            ),
+        )
+        return memory_id
+
+    async def propose_long_term(
+        self,
+        *,
+        id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        memory_type: str,
+        proposed_content: str,
+        proposed_tags: list[str] | None = None,
+        reason: str,
+    ) -> str:
+        proposal_id = id or str(uuid4())
+        await self._connection.execute(
+            """
+            INSERT INTO memory_proposals (
+                id, project_id, task_id, memory_type, proposed_content, 
+                proposed_tags_json, reason, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposal_id,
+                project_id,
+                task_id,
+                memory_type,
+                proposed_content,
+                json.dumps(proposed_tags or []),
+                reason,
+                _now(),
+            ),
+        )
+        return proposal_id
+
+    async def get_proposal(self, proposal_id: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            data = dict(row)
+            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json")))
+            return data
+        return None
+
+    async def update_proposal_status(
+        self, proposal_id: str, status: str, decided_at: str | None = None
+    ) -> bool:
+        cursor = await self._connection.execute(
+            "UPDATE memory_proposals SET status = ?, decided_at = ? WHERE id = ?",
+            (status, decided_at or _now(), proposal_id),
+        )
+        return cursor.rowcount > 0
+
+    async def insert_long_term(
+        self,
+        *,
+        id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        memory_type: str,
+        title: str | None = None,
+        content: str,
+        tags: list[str] | None = None,
+        source: str,
+    ) -> str:
+        memory_id = id or str(uuid4())
+        now = _now()
+        await self._connection.execute(
+            """
+            INSERT INTO long_term_memory (
+                id, project_id, task_id, memory_type, title, content, 
+                tags_json, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                project_id,
+                task_id,
+                memory_type,
+                title,
+                content,
+                json.dumps(tags or []),
+                source,
+                now,
+                now,
+            ),
+        )
+        return memory_id
+
+    async def get_long_term(self, memory_id: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM long_term_memory WHERE id = ?", (memory_id,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            data = dict(row)
+            data["tags"] = json.loads(str(data.pop("tags_json")))
+            return data
+        return None
+
+    async def search_long_term(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        memory_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, object]]:
+        sql = """
+            SELECT m.*, rank
+            FROM long_term_memory m
+            JOIN long_term_memory_idx idx ON m.id = idx.id
+            WHERE long_term_memory_idx MATCH ?
+        """
+        params: list[object] = [query]
+
+        if project_id:
+            sql += " AND m.project_id = ?"
+            params.append(project_id)
+        
+        if memory_type:
+            sql += " AND m.memory_type = ?"
+            params.append(memory_type)
+
+        sql += " ORDER BY rank LIMIT ?"
+        params.append(limit)
+
+        cursor = await self._connection.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            data = dict(row)
+            data["tags"] = json.loads(str(data.pop("tags_json")))
+            results.append(data)
+        return results
+
+    async def delete_long_term(self, memory_id: str) -> bool:
+        cursor = await self._connection.execute(
+            "DELETE FROM long_term_memory WHERE id = ?", (memory_id,)
+        )
+        return cursor.rowcount > 0
+
+
 class StorageRepositories:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self.app_state = AppStateRepository(connection)
         self.audit = AuditRepository(connection)
         self.workspaces = WorkspaceRepository(connection)
         self.projects = ProjectRepository(connection)
+        self.memory = MemoryRepository(connection)
 
 
 def _now() -> str:
