@@ -38,7 +38,7 @@ class MemoryStore:
         proposed_tags: list[str] | None = None,
         reason: str,
     ) -> str:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             proposal_id = await unit.repositories.memory.propose_long_term(
                 project_id=project_id,
@@ -58,7 +58,7 @@ class MemoryStore:
             return proposal_id
 
     async def approve(self, proposal_id: str, title: str | None = None) -> str:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             proposal = await unit.repositories.memory.get_proposal(proposal_id)
             if not proposal:
@@ -95,7 +95,7 @@ class MemoryStore:
             return memory_id
 
     async def deny(self, proposal_id: str, reason: str | None = None) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             proposal = await unit.repositories.memory.get_proposal(proposal_id)
             if not proposal:
@@ -113,7 +113,7 @@ class MemoryStore:
             return updated
 
     async def delete_memory(self, memory_id: str) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             memory = await unit.repositories.memory.get_long_term(memory_id)
             if not memory:
@@ -137,7 +137,7 @@ class MemoryStore:
         memory_type: str | None = None,
         limit: int = 20,
     ) -> list[MemorySearchResult]:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             raw_results = await unit.repositories.memory.search_long_term(
                 query, project_id=project_id, memory_type=memory_type, limit=limit

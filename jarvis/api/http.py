@@ -23,6 +23,11 @@ from jarvis.api.schemas import (
     ProjectCreate,
     ProjectResponse,
     StatusResponse,
+    TaskCreate,
+    TaskResponse,
+    TaskDetailResponse,
+    TaskStepResponse,
+    TaskEventResponse,
     WorkspaceCreate,
     WorkspaceResponse,
 )
@@ -37,6 +42,8 @@ from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.tasks.planner import Planner
+from jarvis.tasks.queue import TaskQueue
 from jarvis.workspaces.registry import WorkspaceRegistry
 
 
@@ -58,6 +65,8 @@ def create_app(
     projects = ProjectRegistry(uow)
     memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
+    planner = Planner(model_router)
+    task_queue = TaskQueue(uow, bus, planner)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -67,7 +76,14 @@ def create_app(
             "database_path": str(db_path),
             "migrations_applied": applied,
         }
+        
+        # Start background worker
+        await task_queue.start()
+        
         yield
+        
+        # Stop background worker
+        await task_queue.stop()
 
     app = FastAPI(title="Jarvis", version=__version__, lifespan=lifespan)
     app.state.config = jarvis_config
@@ -77,6 +93,7 @@ def create_app(
     app.state.projects = projects
     app.state.memory_store = memory_store
     app.state.model_router = model_router
+    app.state.task_queue = task_queue
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -200,7 +217,7 @@ def create_app(
 
     @app.get("/v1/memory/proposals", response_model=list[MemoryProposalResponse])
     async def list_proposals(_: None = Depends(require_api_token)) -> list[MemoryProposalResponse]:
-        async with uow as unit:
+        async with uow.begin() as unit:
             assert unit.repositories is not None
             # We don't have a list_proposals in MemoryStore yet, let's use the repository directly
             # or add it to MemoryStore. Designing to use Store is better.
@@ -243,7 +260,7 @@ def create_app(
         limit: int = 50,
         _: None = Depends(require_api_token),
     ) -> list[MemoryResponse]:
-        async with uow as unit:
+        async with uow.begin() as unit:
             assert unit.repositories is not None
             sql = "SELECT * FROM long_term_memory"
             params = []
@@ -273,6 +290,146 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=404, detail="Memory not found.")
         return JSONResponse({"deleted": True})
+
+    # Task Endpoints
+    @app.post("/v1/tasks", response_model=TaskResponse, status_code=201)
+    async def create_task(data: TaskCreate, _: None = Depends(require_api_token)) -> TaskResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task_id = await unit.repositories.tasks.insert(
+                title="New Task",  # Will be updated by Planner
+                user_request=data.user_request,
+                project_id=data.project_id,
+                priority=data.priority,
+            )
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.create",
+                summary=f"Created task: {task_id}",
+                target=task_id,
+            )
+            task = await unit.repositories.tasks.get(task_id)
+            assert task is not None
+            return TaskResponse(**task)
+
+    @app.get("/v1/tasks", response_model=list[TaskResponse])
+    async def list_tasks(
+        status: str | None = None, limit: int = 50, _: None = Depends(require_api_token)
+    ) -> list[TaskResponse]:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            sql = "SELECT * FROM tasks"
+            params = []
+            if status:
+                sql += " WHERE status = ?"
+                params.append(status)
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = await unit.connection.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+            tasks = []
+            for row in rows:
+                data = dict(row)
+                data["metadata"] = json.loads(str(data.pop("metadata_json")))
+                tasks.append(TaskResponse(**data))
+            return tasks
+
+    @app.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
+    async def get_task(task_id: str, _: None = Depends(require_api_token)) -> TaskDetailResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+            
+            steps = await unit.repositories.tasks.list_steps(task_id)
+            events = await unit.repositories.tasks.list_events(task_id)
+            
+            task["steps"] = [TaskStepResponse(**s) for s in steps]
+            task["events"] = [TaskEventResponse(**e) for e in events]
+            
+            return TaskDetailResponse(**task)
+
+    @app.post("/v1/tasks/{task_id}/plan/approve")
+    async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+            
+            if task["status"] != "waiting_for_plan_approval":
+                raise HTTPException(status_code=400, detail=f"Task is not waiting for plan approval (status: {task['status']})")
+                
+            await unit.repositories.tasks.update(task_id, status="queued")
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                event_type="status_change",
+                message="Plan approved by user",
+                payload={"status": "queued"}
+            )
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.plan_approve",
+                summary=f"Approved plan for task: {task_id}",
+                target=task_id,
+            )
+        return JSONResponse({"approved": True})
+
+    @app.post("/v1/tasks/{task_id}/resume")
+    async def resume_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+                
+            if task["status"] not in ("paused", "failed"):
+                raise HTTPException(status_code=400, detail=f"Cannot resume task in status: {task['status']}")
+                
+            # If a task has steps, it should go back to queued (or waiting for execution).
+            # TaskQueue looks for 'queued' tasks.
+            await unit.repositories.tasks.update(task_id, status="queued")
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                event_type="status_change",
+                message="Task resumed by user",
+                payload={"status": "queued"}
+            )
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.resume",
+                summary=f"Resumed task: {task_id}",
+                target=task_id,
+            )
+        return JSONResponse({"resumed": True})
+
+    @app.post("/v1/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+                
+            if task["status"] in ("completed", "cancelled"):
+                raise HTTPException(status_code=400, detail=f"Task already {task['status']}")
+                
+            await unit.repositories.tasks.update(task_id, status="cancelled")
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                event_type="status_change",
+                message="Task cancelled by user",
+                payload={"status": "cancelled"}
+            )
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.cancel",
+                summary=f"Cancelled task: {task_id}",
+                target=task_id,
+            )
+        return JSONResponse({"cancelled": True})
 
     @app.websocket("/v1/events")
     async def events(websocket: WebSocket) -> None:

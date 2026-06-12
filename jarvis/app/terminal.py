@@ -20,6 +20,7 @@ config_app = typer.Typer(help="Configuration commands.")
 workspace_app = typer.Typer(help="Workspace management.")
 project_app = typer.Typer(help="Project management.")
 memory_app = typer.Typer(help="Memory management.")
+task_app = typer.Typer(help="Task execution and planning.")
 console = Console()
 
 
@@ -439,8 +440,176 @@ def memory_remove(
             _handle_api_error(e)
 
 
+@task_app.command("submit")
+def task_submit(
+    request: str,
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project name or ID."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Submit a new task."""
+    with _get_api_client(config) as client:
+        try:
+            params = {"user_request": request}
+            if project:
+                resp_projects = client.get("/v1/projects")
+                resp_projects.raise_for_status()
+                for p in resp_projects.json():
+                    if p["name"].lower() == project.lower() or p["id"].startswith(project):
+                        params["project_id"] = p["id"]
+                        break
+
+            resp = client.post("/v1/tasks", json=params)
+            resp.raise_for_status()
+            task_id = resp.json()["id"]
+            console.print(f"[green]Task submitted:[/green] {task_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@task_app.command("list")
+def task_list(
+    status: str = typer.Option(None, "--status", "-s"),
+    limit: int = typer.Option(50, "--limit", "-l"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """List tasks."""
+    with _get_api_client(config) as client:
+        try:
+            params = {"limit": limit}
+            if status:
+                params["status"] = status
+            resp = client.get("/v1/tasks", params=params)
+            resp.raise_for_status()
+            tasks = resp.json()
+
+            if not tasks:
+                console.print("No tasks found.")
+                return
+
+            table = Table(title="Tasks")
+            table.add_column("ID", style="dim")
+            table.add_column("Status", style="cyan")
+            table.add_column("Title")
+
+            for t in tasks:
+                table.add_row(t["id"][:8], t["status"], t["title"])
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@task_app.command("status")
+def task_status(
+    task_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Get task status and steps."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+
+            resp = client.get(f"/v1/tasks/{task_id}")
+            resp.raise_for_status()
+            task = resp.json()
+
+            console.print(f"[bold]Task:[/bold] {task['title']} ({task['id'][:8]})")
+            console.print(f"[bold]Status:[/bold] {task['status']}")
+            
+            steps = task.get("steps", [])
+            if not steps:
+                console.print("No steps yet.")
+                return
+
+            table = Table(title="Steps")
+            table.add_column("#", justify="right", style="dim")
+            table.add_column("Status", style="cyan")
+            table.add_column("Title")
+            
+            for s in steps:
+                table.add_row(str(s["step_index"]), s["status"], s["title"])
+            console.print(table)
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@task_app.command("approve")
+def task_approve(
+    task_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Approve a task plan."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+
+            resp = client.post(f"/v1/tasks/{task_id}/plan/approve")
+            resp.raise_for_status()
+            console.print(f"[green]Task plan approved:[/green] {task_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@task_app.command("resume")
+def task_resume(
+    task_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Resume a paused task."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+
+            resp = client.post(f"/v1/tasks/{task_id}/resume")
+            resp.raise_for_status()
+            console.print(f"[green]Task resumed:[/green] {task_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@task_app.command("cancel")
+def task_cancel(
+    task_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Cancel a task."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+
+            resp = client.post(f"/v1/tasks/{task_id}/cancel")
+            resp.raise_for_status()
+            console.print(f"[green]Task cancelled:[/green] {task_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
 app.add_typer(config_app, name="config")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(project_app, name="project")
 app.add_typer(memory_app, name="memory")
+app.add_typer(task_app, name="task")
 

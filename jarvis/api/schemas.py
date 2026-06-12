@@ -92,3 +92,53 @@ class MemoryApproveRequest(BaseModel):
 class MemoryDenialRequest(BaseModel):
     reason: str | None = None
 
+
+class TaskCreate(BaseModel):
+    user_request: str
+    project_id: str | None = None
+    priority: int = 100
+
+
+class TaskStepResponse(BaseModel):
+    id: str
+    step_index: int
+    title: str
+    description: str | None = None
+    tool_name: str | None = None
+    input_json: str | None = None
+    status: str
+    requires_approval: bool
+    attempt_count: int
+    output_json: str | None = None
+    error: str | None = None
+
+
+class TaskEventResponse(BaseModel):
+    id: str
+    step_id: str | None = None
+    event_type: str
+    message: str | None = None
+    payload_json: str | None = None
+    created_at: str
+
+
+class TaskResponse(BaseModel):
+    id: str
+    parent_task_id: str | None = None
+    project_id: str | None = None
+    title: str
+    user_request: str
+    status: str
+    priority: int
+    metadata: dict[str, object] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    claimed_at: str | None = None
+
+
+class TaskDetailResponse(TaskResponse):
+    steps: list[TaskStepResponse] = Field(default_factory=list)
+    events: list[TaskEventResponse] = Field(default_factory=list)
+

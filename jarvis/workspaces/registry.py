@@ -15,7 +15,7 @@ class WorkspaceRegistry:
         # Normalize path
         normalized_path = str(Path(path).resolve())
         
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             # Check for existing workspace with same normalized path
             existing = await unit.repositories.workspaces.get_by_path(normalized_path)
@@ -34,23 +34,23 @@ class WorkspaceRegistry:
             return workspace_id
 
     async def get(self, workspace_id: str) -> dict[str, object] | None:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.workspaces.get(workspace_id)
 
     async def get_by_path(self, path: str) -> dict[str, object] | None:
         normalized_path = str(Path(path).resolve())
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.workspaces.get_by_path(normalized_path)
 
     async def list(self) -> list[dict[str, object]]:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             return await unit.repositories.workspaces.list()
 
     async def update(self, workspace_id: str, **kwargs: object) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             workspace = await unit.repositories.workspaces.get(workspace_id)
             if not workspace:
@@ -68,7 +68,7 @@ class WorkspaceRegistry:
             return updated
 
     async def remove(self, workspace_id: str) -> bool:
-        async with self._uow as unit:
+        async with self._uow.begin() as unit:
             assert unit.repositories is not None
             workspace = await unit.repositories.workspaces.get(workspace_id)
             if not workspace:
