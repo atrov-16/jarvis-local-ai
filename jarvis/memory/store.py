@@ -209,8 +209,9 @@ class MemoryStore:
             m_type = str(r["memory_type"])
             content = str(r["content"])
             m_id = str(r["id"])
+            scope = "(Project)" if r.get("project_id") else "(Global)"
             
-            entry_str = f"[{m_type.capitalize()}] {content}"
+            entry_str = f"[{m_type.capitalize()}] {scope} {content}"
             entry_len = len(entry_str) + 1  # +1 for newline
             
             if used_total + entry_len > total_budget:

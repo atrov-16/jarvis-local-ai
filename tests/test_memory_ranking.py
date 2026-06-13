@@ -50,9 +50,9 @@ async def test_memory_ranking_multiplicative(uow):
     assert memory_ids[1] == "C"
     assert memory_ids[2] == "A"
     
-    assert "[Preference] Strong preference" in context_str
-    assert "[Decision] Project decision" in context_str
-    assert "[Fact] Generic fact" in context_str
+    assert "[Preference] (Global) Strong preference" in context_str
+    assert "[Decision] (Project) Project decision" in context_str
+    assert "[Fact] (Global) Generic fact" in context_str
 
 
 @pytest.mark.asyncio
