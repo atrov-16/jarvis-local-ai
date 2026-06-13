@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from jarvis.core.event_bus import EventBus
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
+from jarvis.tools.executor import ToolExecutor
+from jarvis.tools.base import ToolCategory
 
 if TYPE_CHECKING:
     from jarvis.tasks.planner import PlannedTask
@@ -18,10 +21,17 @@ LOG = logging.getLogger(__name__)
 
 
 class TaskQueue:
-    def __init__(self, uow: UnitOfWork, event_bus: EventBus, planner: Planner) -> None:
+    def __init__(
+        self, 
+        uow: UnitOfWork, 
+        event_bus: EventBus, 
+        planner: Planner,
+        tool_executor: ToolExecutor,
+    ) -> None:
         self._uow = uow
         self._event_bus = event_bus
         self._planner = planner
+        self._tool_executor = tool_executor
         self._worker_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
@@ -237,8 +247,71 @@ class TaskQueue:
         step_id = step["id"]
         LOG.info(f"Executing step {step_id}: {step['title']}")
         
+        # 1. Resolve Tool Category and Workspace Policies
+        tool_name = step["tool_name"]
+        if not tool_name:
+            # Native step with no tool, just mark completed
+            async with self._uow.begin() as unit:
+                assert unit.repositories is not None
+                await unit.repositories.tasks.update_step(step_id, status="running")
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="step_started",
+                    message=f"Starting step: {step['title']}"
+                )
+                await unit.repositories.tasks.update_step(step_id, status="completed")
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="step_completed",
+                    message=f"Completed step: {step['title']}"
+                )
+            return True
+
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            project_id = task["project_id"]
+            
+            # Get tool info
+            try:
+                tool = self._tool_executor._registry.get(tool_name)
+                tool_category = tool.category
+            except KeyError:
+                await unit.repositories.tasks.update_step(step_id, status="failed", error=f"Tool not found: {tool_name}")
+                return False
+
+            # Check for Approval Requirement
+            needs_approval = bool(step["requires_approval"])
+            
+            # If not already flagged by LLM, check workspace policy for mutating tools
+            if not needs_approval and tool_category == ToolCategory.MUTATING and project_id:
+                workspaces = await unit.repositories.projects.list_workspaces(project_id)
+                for ws in workspaces:
+                    if ws["write_policy"] == "approval_required":
+                        needs_approval = True
+                        break
+
+            # If we need approval and haven't gotten it yet (indicated by not being in 'running' already)
+            # Actually, the queue sets status to 'running' BEFORE calling _execute_step in the original code.
+            # But we want to pause BEFORE marking it running if approval is needed.
+            
+            # Let's adjust: if it needs approval and status is not 'running', pause.
+            if needs_approval and step["status"] != "running":
+                await unit.repositories.tasks.update_step(step_id, status="waiting_for_approval")
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="status_change",
+                    message=f"Step '{step['title']}' requires approval.",
+                    payload={"status": "waiting_for_approval"}
+                )
+                # Halt task execution for this task
+                await unit.repositories.tasks.update(task_id, status="paused")
+                return False
+
+            # 2. Mark step as running (if not already)
             await unit.repositories.tasks.update_step(
                 step_id, 
                 status="running", 
@@ -251,17 +324,55 @@ class TaskQueue:
                 message=f"Starting step: {step['title']}"
             )
 
-        # Phase 7 placeholder: Tool execution logic goes here.
-        # For Phase 5 Step 3, we just mark it completed.
-        await asyncio.sleep(0.5) 
-        
+        # 3. Context Preparation
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
-            await unit.repositories.tasks.update_step(step_id, status="completed")
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                step_id=step_id,
-                event_type="step_completed",
-                message=f"Completed step: {step['title']}"
-            )
-        return True
+            workspaces = []
+            if project_id:
+                workspaces = await unit.repositories.projects.list_workspaces(project_id)
+            
+            context = {
+                "uow": self._uow,
+                "project_id": project_id,
+                "task_id": task_id,
+                "current_task_id": task_id,
+                "workspaces": workspaces
+            }
+
+        # 4. Actual Execution
+        result = await self._tool_executor.execute_step(
+            tool_name=tool_name,
+            input_json=step["input_json"],
+            **context
+        )
+        
+        # 5. Result Handling
+        async with self._uow.begin() as unit:
+            assert unit.repositories is not None
+            if result.success:
+                await unit.repositories.tasks.update_step(
+                    step_id, 
+                    status="completed", 
+                    output_json=json.dumps(result.data)
+                )
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="step_completed",
+                    message=f"Completed step: {step['title']}"
+                )
+                return True
+            else:
+                await unit.repositories.tasks.update_step(
+                    step_id, 
+                    status="failed", 
+                    error=result.error
+                )
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="step_failed",
+                    message=f"Step failed: {result.error}",
+                    payload={"error": result.error}
+                )
+                return False

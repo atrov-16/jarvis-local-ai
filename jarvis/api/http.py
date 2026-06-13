@@ -44,6 +44,11 @@ from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
 from jarvis.tasks.queue import TaskQueue
+from jarvis.tools.executor import ToolExecutor
+from jarvis.tools.registry import ToolRegistry
+from jarvis.tools.filesystem import ReadFileTool, WriteFileTool, ListDirectoryTool
+from jarvis.tools.memory import SearchMemoryTool, CreateMemoryProposalTool
+from jarvis.tools.tasks import GetTaskStatusTool
 from jarvis.workspaces.registry import WorkspaceRegistry
 
 
@@ -66,7 +71,18 @@ def create_app(
     memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
     planner = Planner(model_router)
-    task_queue = TaskQueue(uow, bus, planner)
+
+    # Tool System
+    registry = ToolRegistry()
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    registry.register(ListDirectoryTool())
+    registry.register(SearchMemoryTool())
+    registry.register(CreateMemoryProposalTool())
+    registry.register(GetTaskStatusTool())
+    tool_executor = ToolExecutor(registry)
+
+    task_queue = TaskQueue(uow, bus, planner, tool_executor)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
