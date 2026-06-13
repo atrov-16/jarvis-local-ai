@@ -24,6 +24,7 @@ from jarvis.api.schemas import (
     ProjectResponse,
     StatusResponse,
     TaskCreate,
+    TaskDecisionRequest,
     TaskResponse,
     TaskDetailResponse,
     TaskStepResponse,
@@ -398,6 +399,119 @@ def create_app(
         async with uow.begin() as unit:
             assert unit.repositories is not None
             task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+            
+            if task["status"] not in ("paused", "failed"):
+                raise HTTPException(status_code=400, detail=f"Task cannot be resumed from status: {task['status']}")
+                
+            await unit.repositories.tasks.update(task_id, status="queued")
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                event_type="status_change",
+                message="Task resumed by user",
+                payload={"status": "queued"}
+            )
+        return JSONResponse({"resumed": True})
+
+    @app.post("/v1/tasks/{task_id}/steps/{step_id}/approve", response_model=TaskStepResponse)
+    async def approve_task_step(
+        task_id: str,
+        step_id: str,
+        data: TaskDecisionRequest,
+        _: None = Depends(require_api_token),
+    ) -> TaskStepResponse:
+        """Approve a paused task step."""
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            step = await unit.repositories.tasks.get_step(step_id)
+            if not step or step["task_id"] != task_id:
+                raise HTTPException(status_code=404, detail="Step not found")
+            
+            if step["status"] != "waiting_for_approval":
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Step is not waiting for approval (current status: {step['status']})"
+                )
+                
+            # 1. Update step status to 'approved'
+            await unit.repositories.tasks.update_step(step_id, status="approved")
+            
+            # 2. Update task status to 'queued' to resume execution
+            await unit.repositories.tasks.update(task_id, status="queued")
+            
+            # 3. Insert events
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                step_id=step_id,
+                event_type="approval_granted",
+                message=f"Step approved: {step['title']}",
+                payload={"reason": data.reason}
+            )
+            
+            # 4. Audit
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.step_approve",
+                summary=f"Approved task step: {step['title']}",
+                target=step_id,
+                details={"task_id": task_id, "reason": data.reason},
+                task_id=task_id,
+            )
+            
+            updated_step = await unit.repositories.tasks.get_step(step_id)
+            assert updated_step is not None
+            return TaskStepResponse(**updated_step)
+
+    @app.post("/v1/tasks/{task_id}/steps/{step_id}/deny", response_model=TaskStepResponse)
+    async def deny_task_step(
+        task_id: str,
+        step_id: str,
+        data: TaskDecisionRequest,
+        _: None = Depends(require_api_token),
+    ) -> TaskStepResponse:
+        """Deny a paused task step, failing the task."""
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            step = await unit.repositories.tasks.get_step(step_id)
+            if not step or step["task_id"] != task_id:
+                raise HTTPException(status_code=404, detail="Step not found")
+                
+            if step["status"] != "waiting_for_approval":
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Step is not waiting for approval (current status: {step['status']})"
+                )
+                
+            # 1. Update step status to 'failed'
+            error_msg = f"Denied by user: {data.reason}" if data.reason else "Denied by user."
+            await unit.repositories.tasks.update_step(step_id, status="failed", error=error_msg)
+            
+            # 2. Update task status to 'failed'
+            await unit.repositories.tasks.update(task_id, status="failed")
+            
+            # 3. Insert events
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                step_id=step_id,
+                event_type="approval_denied",
+                message=f"Step denied: {step['title']}",
+                payload={"reason": data.reason}
+            )
+            
+            # 4. Audit
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.step_deny",
+                summary=f"Denied task step: {step['title']}",
+                target=step_id,
+                details={"task_id": task_id, "reason": data.reason},
+                task_id=task_id,
+            )
+            
+            updated_step = await unit.repositories.tasks.get_step(step_id)
+            assert updated_step is not None
+            return TaskStepResponse(**updated_step)
             if not task:
                 raise HTTPException(status_code=404, detail="Task not found.")
                 

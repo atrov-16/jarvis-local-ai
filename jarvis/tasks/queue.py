@@ -190,23 +190,28 @@ class TaskQueue:
 
     async def _run_execution(self, task_id: str) -> None:
         LOG.info(f"Starting execution for task {task_id}")
+        
+        # 1. Ensure task is marked as 'running'
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
-            await unit.repositories.tasks.update(
-                task_id, 
-                status="running", 
-                started_at=datetime.now(UTC).isoformat(),
-                claimed_at=datetime.now(UTC).isoformat()
-            )
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                event_type="status_change",
-                message="Execution started",
-                payload={"status": "running"}
-            )
+            task = await unit.repositories.tasks.get(task_id)
+            if task["status"] != "running":
+                await unit.repositories.tasks.update(
+                    task_id, 
+                    status="running", 
+                    started_at=datetime.now(UTC).isoformat() if not task["started_at"] else task["started_at"],
+                    claimed_at=datetime.now(UTC).isoformat()
+                )
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    event_type="status_change",
+                    message="Execution started/resumed",
+                    payload={"status": "running"}
+                )
+            
             steps = await unit.repositories.tasks.list_steps(task_id)
 
-        # Execute steps sequentially
+        # 2. Execute steps sequentially
         for step in steps:
             if self._stop_event.is_set():
                 break
@@ -214,34 +219,36 @@ class TaskQueue:
             if step["status"] == "completed":
                 continue
                 
-            # Check for pause/cancellation
+            # Check for external pause/cancellation
             async with self._uow.begin() as unit:
                 assert unit.repositories is not None
                 current_task = await unit.repositories.tasks.get(task_id)
                 if current_task["status"] != "running":
-                    LOG.info(f"Task {task_id} no longer running (status: {current_task['status']}), stopping execution.")
+                    LOG.info(f"Task {task_id} transitioned to {current_task['status']}, stopping execution loop.")
                     return
 
             # Execute the step
             success = await self._execute_step(task_id, step)
             if not success:
-                # Task halted on first failure in V1
+                # Task halted on failure or approval pause
                 return
 
-        # Finish task
+        # 3. Finish task
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
-            await unit.repositories.tasks.update(
-                task_id, 
-                status="completed", 
-                completed_at=datetime.now(UTC).isoformat()
-            )
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                event_type="status_change",
-                message="Task completed successfully",
-                payload={"status": "completed"}
-            )
+            current_task = await unit.repositories.tasks.get(task_id)
+            if current_task["status"] == "running":
+                await unit.repositories.tasks.update(
+                    task_id, 
+                    status="completed", 
+                    completed_at=datetime.now(UTC).isoformat()
+                )
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    event_type="status_change",
+                    message="Task completed successfully",
+                    payload={"status": "completed"}
+                )
 
     async def _execute_step(self, task_id: str, step: dict[str, Any]) -> bool:
         step_id = step["id"]
@@ -271,6 +278,11 @@ class TaskQueue:
 
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
+            # Refresh step data to get the latest status (important for resumption)
+            current_step = await unit.repositories.tasks.get_step(step_id)
+            if not current_step:
+                return False
+            
             task = await unit.repositories.tasks.get(task_id)
             project_id = task["project_id"]
             
@@ -283,7 +295,7 @@ class TaskQueue:
                 return False
 
             # Check for Approval Requirement
-            needs_approval = bool(step["requires_approval"])
+            needs_approval = bool(current_step["requires_approval"])
             
             # If not already flagged by LLM, check workspace policy for mutating tools
             if not needs_approval and tool_category == ToolCategory.MUTATING and project_id:
@@ -293,29 +305,28 @@ class TaskQueue:
                         needs_approval = True
                         break
 
-            # If we need approval and haven't gotten it yet (indicated by not being in 'running' already)
-            # Actually, the queue sets status to 'running' BEFORE calling _execute_step in the original code.
-            # But we want to pause BEFORE marking it running if approval is needed.
-            
-            # Let's adjust: if it needs approval and status is not 'running', pause.
-            if needs_approval and step["status"] != "running":
+            # If we need approval and haven't gotten it yet.
+            # We skip the pause if the status is already 'running' OR 'approved'.
+            # 'approved' means the user just approved this step via the API.
+            if needs_approval and current_step["status"] not in ("running", "approved"):
                 await unit.repositories.tasks.update_step(step_id, status="waiting_for_approval")
                 await unit.repositories.tasks.insert_event(
                     task_id=task_id,
                     step_id=step_id,
-                    event_type="status_change",
+                    event_type="approval_requested",
                     message=f"Step '{step['title']}' requires approval.",
                     payload={"status": "waiting_for_approval"}
                 )
                 # Halt task execution for this task
-                await unit.repositories.tasks.update(task_id, status="paused")
+                if task["status"] == "running":
+                    await unit.repositories.tasks.update(task_id, status="paused")
                 return False
 
             # 2. Mark step as running (if not already)
             await unit.repositories.tasks.update_step(
                 step_id, 
                 status="running", 
-                attempt_count=step["attempt_count"] + 1
+                attempt_count=current_step["attempt_count"] + 1
             )
             await unit.repositories.tasks.insert_event(
                 task_id=task_id,
