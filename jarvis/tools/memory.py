@@ -53,6 +53,8 @@ class SearchMemoryTool(BaseTool):
                     "title": r.title,
                     "content": r.content,
                     "tags": r.tags,
+                    "importance": r.importance,
+                    "source_ids": r.source_ids,
                     "relevance": r.relevance_score
                 }
                 for r in results
@@ -64,9 +66,11 @@ class SearchMemoryTool(BaseTool):
 
 class CreateMemoryProposalInput(BaseModel):
     content: str = Field(..., description="The content of the memory.")
-    memory_type: str = Field("fact", description="Type: fact, preference, lesson, note.")
+    memory_type: str = Field("fact", description="Type: fact, preference, decision, reflection, note.")
     tags: List[str] = Field(default_factory=list, description="Optional tags.")
     reason: str = Field(..., description="Why this memory is worth saving.")
+    importance: float = Field(0.5, description="Base importance score from 0.0 to 1.0.")
+    source_ids: List[str] = Field(default_factory=list, description="IDs of tasks or memories that justify this proposal.")
 
 
 class CreateMemoryProposalTool(BaseTool):
@@ -98,8 +102,11 @@ class CreateMemoryProposalTool(BaseTool):
                 memory_type=kwargs["memory_type"],
                 proposed_content=kwargs["content"],
                 proposed_tags=kwargs.get("tags"),
-                reason=kwargs["reason"]
+                reason=kwargs["reason"],
+                importance=kwargs.get("importance", 0.5),
+                source_ids=kwargs.get("source_ids"),
             )
+
             
             return ToolResult(
                 success=True, 

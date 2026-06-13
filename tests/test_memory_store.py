@@ -23,7 +23,9 @@ async def test_propose_and_approve(memory_store, uow):
         memory_type="fact",
         proposed_content="Python is great",
         reason="User stated preference",
-        proposed_tags=["python"]
+        proposed_tags=["python"],
+        importance=0.9,
+        source_ids=["t1", "t2"]
     )
     assert proposal_id is not None
     
@@ -42,6 +44,8 @@ async def test_propose_and_approve(memory_store, uow):
     assert len(results) == 1
     assert results[0].content == "Python is great"
     assert results[0].title == "Language Fact"
+    assert results[0].importance == 0.9
+    assert results[0].source_ids == ["t1", "t2"]
     
     # Verify audit log for approval
     async with uow.begin() as unit:

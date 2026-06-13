@@ -15,7 +15,7 @@ async def test_migrations_create_database_and_are_idempotent(tmp_path: Path) -> 
         applied_second = await run_migrations(connection)
 
     assert database_path.exists()
-    assert applied_first == [1, 2, 3, 4, 5, 6]
+    assert applied_first == [1, 2, 3, 4, 5, 6, 7]
     assert applied_second == []
 
 async def test_projects_and_workspaces_schema(tmp_path: Path) -> None:
