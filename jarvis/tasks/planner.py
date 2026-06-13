@@ -34,6 +34,8 @@ Rules:
 3. For complex tasks, break them down logically (e.g., Read -> Analyze -> Modify -> Verify).
 4. Identify which steps are risky and require approval (e.g., file writes, command execution).
 5. Output ONLY a valid JSON object matching the requested schema.
+6. Decision Precedence: If [Decision] memories are provided in the context, treat them as absolute, non-negotiable rules.
+7. Conflict Resolution: If injected memories conflict, prefer [Decision] over [Preference] or [Fact], and prefer (Project) scoped memories over (Global) ones.
 
 Schema:
 {
