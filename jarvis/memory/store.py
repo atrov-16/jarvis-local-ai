@@ -19,6 +19,10 @@ class MemorySearchResult:
     content: str
     tags: list[str]
     source: str
+    importance: float
+    access_count: int
+    last_retrieved_at: str | None
+    source_ids: list[str]
     relevance_score: float
     created_at: str
     updated_at: str
@@ -37,6 +41,8 @@ class MemoryStore:
         proposed_content: str,
         proposed_tags: list[str] | None = None,
         reason: str,
+        importance: float = 0.5,
+        source_ids: list[str] | None = None,
     ) -> str:
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
@@ -47,6 +53,8 @@ class MemoryStore:
                 proposed_content=proposed_content,
                 proposed_tags=proposed_tags,
                 reason=reason,
+                importance=importance,
+                source_ids=source_ids,
             )
             await unit.repositories.audit.insert(
                 actor="system",
@@ -82,6 +90,8 @@ class MemoryStore:
                 content=proposal["proposed_content"],
                 tags=proposal["proposed_tags"],
                 source="proposal_promotion",
+                importance=float(proposal.get("importance", 0.5)),
+                source_ids=proposal.get("source_ids", []),
             )
 
             # 3. Audit
@@ -145,16 +155,20 @@ class MemoryStore:
             
             return [
                 MemorySearchResult(
-                    id=r["id"],
-                    project_id=r["project_id"],
-                    memory_type=r["memory_type"],
-                    title=r["title"],
-                    content=r["content"],
-                    tags=r["tags"],
-                    source=r["source"],
+                    id=str(r["id"]),
+                    project_id=str(r["project_id"]) if r["project_id"] else None,
+                    memory_type=str(r["memory_type"]),
+                    title=str(r["title"]) if r["title"] else None,
+                    content=str(r["content"]),
+                    tags=r["tags"], # type: ignore
+                    source=str(r["source"]),
+                    importance=float(r.get("importance", 0.5)),
+                    access_count=int(r.get("access_count", 0)),
+                    last_retrieved_at=str(r["last_retrieved_at"]) if r.get("last_retrieved_at") else None,
+                    source_ids=r.get("source_ids", []), # type: ignore
                     relevance_score=float(r["rank"]),
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"],
+                    created_at=str(r["created_at"]),
+                    updated_at=str(r["updated_at"]),
                 )
                 for r in raw_results
             ]

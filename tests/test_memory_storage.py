@@ -36,13 +36,17 @@ async def test_long_term_memory_lifecycle(uow):
             memory_type="fact",
             proposed_content="The sky is blue",
             reason="Observed phenomenon",
-            proposed_tags=["nature"]
+            proposed_tags=["nature"],
+            importance=0.8,
+            source_ids=["task-123"]
         )
         
         # 2. Get Proposal
         proposal = await unit.repositories.memory.get_proposal(proposal_id)
         assert proposal["proposed_content"] == "The sky is blue"
         assert proposal["status"] == "pending"
+        assert proposal["importance"] == 0.8
+        assert proposal["source_ids"] == ["task-123"]
         
         # 3. Update Status
         await unit.repositories.memory.update_proposal_status(proposal_id, "approved")
@@ -55,7 +59,9 @@ async def test_long_term_memory_lifecycle(uow):
             content=proposal["proposed_content"],
             tags=proposal["proposed_tags"],
             source="proposal_promotion",
-            title="Sky Color"
+            title="Sky Color",
+            importance=proposal["importance"],
+            source_ids=proposal["source_ids"]
         )
         
         # 5. Verify Long Term
@@ -63,6 +69,24 @@ async def test_long_term_memory_lifecycle(uow):
         assert memory["content"] == "The sky is blue"
         assert memory["memory_type"] == "fact"
         assert memory["title"] == "Sky Color"
+        assert memory["importance"] == 0.8
+        assert memory["source_ids"] == ["task-123"]
+        assert memory["access_count"] == 0
+        assert memory["last_retrieved_at"] is None
+
+async def test_update_memory_access(uow):
+    async with uow.begin() as unit:
+        memory_id = await unit.repositories.memory.insert_long_term(
+            memory_type="fact",
+            content="Testing access",
+            source="manual"
+        )
+        
+        await unit.repositories.memory.update_memory_access([memory_id])
+        
+        memory = await unit.repositories.memory.get_long_term(memory_id)
+        assert memory["access_count"] == 1
+        assert memory["last_retrieved_at"] is not None
 
 async def test_fts5_search(uow):
     async with uow.begin() as unit:

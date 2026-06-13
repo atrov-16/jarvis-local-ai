@@ -346,15 +346,17 @@ class MemoryRepository:
         proposed_content: str,
         proposed_tags: list[str] | None = None,
         reason: str,
+        importance: float = 0.5,
+        source_ids: list[str] | None = None,
     ) -> str:
         proposal_id = id or str(uuid4())
         await self._connection.execute(
             """
             INSERT INTO memory_proposals (
                 id, project_id, task_id, memory_type, proposed_content, 
-                proposed_tags_json, reason, created_at
+                proposed_tags_json, reason, importance, source_ids_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposal_id,
@@ -364,6 +366,8 @@ class MemoryRepository:
                 proposed_content,
                 json.dumps(proposed_tags or []),
                 reason,
+                importance,
+                json.dumps(source_ids or []),
                 _now(),
             ),
         )
@@ -376,7 +380,8 @@ class MemoryRepository:
         row = await cursor.fetchone()
         if row:
             data = dict(row)
-            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json")))
+            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json", "[]")))
+            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
             return data
         return None
 
@@ -400,6 +405,8 @@ class MemoryRepository:
         content: str,
         tags: list[str] | None = None,
         source: str,
+        importance: float = 0.5,
+        source_ids: list[str] | None = None,
     ) -> str:
         memory_id = id or str(uuid4())
         now = _now()
@@ -407,9 +414,9 @@ class MemoryRepository:
             """
             INSERT INTO long_term_memory (
                 id, project_id, task_id, memory_type, title, content, 
-                tags_json, source, created_at, updated_at
+                tags_json, source, importance, source_ids_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
@@ -420,6 +427,8 @@ class MemoryRepository:
                 content,
                 json.dumps(tags or []),
                 source,
+                importance,
+                json.dumps(source_ids or []),
                 now,
                 now,
             ),
@@ -433,7 +442,8 @@ class MemoryRepository:
         row = await cursor.fetchone()
         if row:
             data = dict(row)
-            data["tags"] = json.loads(str(data.pop("tags_json")))
+            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
+            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
             return data
         return None
 
@@ -469,7 +479,8 @@ class MemoryRepository:
         results = []
         for row in rows:
             data = dict(row)
-            data["tags"] = json.loads(str(data.pop("tags_json")))
+            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
+            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
             results.append(data)
         return results
 
@@ -478,6 +489,24 @@ class MemoryRepository:
             "DELETE FROM long_term_memory WHERE id = ?", (memory_id,)
         )
         return cursor.rowcount > 0
+
+    async def update_memory_access(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+            
+        now = _now()
+        placeholders = ",".join(["?"] * len(memory_ids))
+        
+        # Increment access_count and update last_retrieved_at
+        await self._connection.execute(
+            f"""
+            UPDATE long_term_memory 
+            SET access_count = access_count + 1,
+                last_retrieved_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (now, *memory_ids)
+        )
 
 
 class TaskRepository:

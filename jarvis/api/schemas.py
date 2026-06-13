@@ -64,6 +64,10 @@ class MemoryResponse(BaseModel):
     content: str
     tags: list[str] = Field(default_factory=list)
     source: str
+    importance: float = 0.5
+    access_count: int = 0
+    last_retrieved_at: str | None = None
+    source_ids: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -81,8 +85,11 @@ class MemoryProposalResponse(BaseModel):
     proposed_tags: list[str] = Field(default_factory=list)
     reason: str
     status: str
+    importance: float = 0.5
+    source_ids: list[str] = Field(default_factory=list)
     created_at: str
     decided_at: str | None = None
+
 
 
 class MemoryApproveRequest(BaseModel):
