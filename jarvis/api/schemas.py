@@ -142,3 +142,7 @@ class TaskDetailResponse(TaskResponse):
     steps: list[TaskStepResponse] = Field(default_factory=list)
     events: list[TaskEventResponse] = Field(default_factory=list)
 
+
+class TaskDecisionRequest(BaseModel):
+    reason: str | None = Field(None, description="Optional reason for the decision.")
+
