@@ -453,7 +453,7 @@ class MemoryRepository:
         *,
         project_id: str | None = None,
         memory_type: str | None = None,
-        limit: int = 20,
+        limit: int = 50,
     ) -> list[dict[str, object]]:
         sql = """
             SELECT m.*, rank
@@ -464,7 +464,7 @@ class MemoryRepository:
         params: list[object] = [query]
 
         if project_id:
-            sql += " AND m.project_id = ?"
+            sql += " AND (m.project_id = ? OR m.project_id IS NULL)"
             params.append(project_id)
         
         if memory_type:

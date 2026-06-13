@@ -139,6 +139,104 @@ class MemoryStore:
                 )
             return deleted
 
+    async def get_planner_context(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+    ) -> tuple[str, list[str]]:
+        """Retrieve, rank, and budget memories for planner context injection."""
+        async with self._uow.begin() as unit:
+            assert unit.repositories is not None
+            raw_results = await unit.repositories.memory.search_long_term(
+                query, project_id=project_id, limit=50
+            )
+
+        if not raw_results:
+            return "", []
+
+        now = datetime.now(UTC)
+        ranked_results = []
+        
+        ranks = [float(r["rank"]) for r in raw_results]
+        min_rank = min(ranks)
+        max_rank = max(ranks)
+        rank_range = max_rank - min_rank
+        
+        import math
+        for r in raw_results:
+            # Normalize S_fts to 0.1 - 1.0 (1.0 being the best/lowest rank)
+            if rank_range == 0:
+                s_fts = 1.0
+            else:
+                s_fts = 0.1 + 0.9 * ((max_rank - float(r["rank"])) / rank_range)
+
+            importance = float(r.get("importance", 0.5))
+            
+            r_boost = 0.0
+            last_retrieved_str = r.get("last_retrieved_at") or r.get("created_at")
+            if last_retrieved_str:
+                try:
+                    last_retrieved = datetime.fromisoformat(str(last_retrieved_str))
+                    days_diff = (now - last_retrieved).total_seconds() / 86400
+                    r_boost = min(0.1, 0.1 * (1.0 / (1.0 + max(0, days_diff))))
+                except ValueError:
+                    pass
+                    
+            access_count = int(r.get("access_count", 0))
+            f_boost = min(0.05, 0.05 * (math.log10(1 + access_count) / math.log10(100))) if access_count > 0 else 0.0
+            
+            p_boost = 1.2 if r.get("project_id") == project_id and project_id else 1.0
+            
+            final_score = s_fts * (1.0 + (importance - 0.5)) * p_boost * (1.0 + r_boost + f_boost)
+            ranked_results.append((final_score, r))
+            
+        ranked_results.sort(key=lambda x: x[0], reverse=True)
+        
+        # Categorical Token Budgeting (approx 1 token = 4 chars)
+        budget_decisions = 1600
+        budget_reflections = 1200
+        total_budget = 6000
+        
+        used_total = 0
+        used_decisions = 0
+        used_reflections = 0
+        
+        selected_memories = []
+        memory_ids = []
+        
+        for _, r in ranked_results:
+            m_type = str(r["memory_type"])
+            content = str(r["content"])
+            m_id = str(r["id"])
+            
+            entry_str = f"[{m_type.capitalize()}] {content}"
+            entry_len = len(entry_str) + 1  # +1 for newline
+            
+            if used_total + entry_len > total_budget:
+                continue
+                
+            if m_type == "decision":
+                if used_decisions + entry_len > budget_decisions:
+                    continue
+                used_decisions += entry_len
+            elif m_type == "reflection":
+                if used_reflections + entry_len > budget_reflections:
+                    continue
+                used_reflections += entry_len
+            
+            used_total += entry_len
+            selected_memories.append(entry_str)
+            memory_ids.append(m_id)
+            
+        if not selected_memories:
+            return "", []
+            
+        context_str = "### SYSTEM CONTEXT & MEMORIES\nPlease adhere to the following rules, facts, and user preferences when formulating your plan:\n\n"
+        context_str += "\n".join(selected_memories)
+        
+        return context_str, memory_ids
+
     async def search(
         self,
         query: str,
