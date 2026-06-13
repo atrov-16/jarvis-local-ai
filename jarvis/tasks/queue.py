@@ -13,9 +13,11 @@ from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
 from jarvis.tools.executor import ToolExecutor
 from jarvis.tools.base import ToolCategory
+from jarvis.memory.store import MemoryStore
 
 if TYPE_CHECKING:
     from jarvis.tasks.planner import PlannedTask
+    from jarvis.core.events import Event
 
 LOG = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ class TaskQueue:
         self._planner = planner
         self._tool_executor = tool_executor
         self._worker_task: asyncio.Task[None] | None = None
+        self._event_listener_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
@@ -41,6 +44,8 @@ class TaskQueue:
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._worker_loop())
             LOG.info("TaskQueue worker started.")
+        if self._event_listener_task is None:
+            self._event_listener_task = asyncio.create_task(self._event_listener_loop())
 
     async def stop(self) -> None:
         """Stop the background worker."""
@@ -51,7 +56,32 @@ class TaskQueue:
             except asyncio.TimeoutError:
                 self._worker_task.cancel()
             self._worker_task = None
-            LOG.info("TaskQueue worker stopped.")
+            
+        if self._event_listener_task:
+            self._event_listener_task.cancel()
+            self._event_listener_task = None
+            
+        LOG.info("TaskQueue worker stopped.")
+
+    async def _event_listener_loop(self) -> None:
+        subscription = self._event_bus.subscribe(max_queue_size=1000)
+        try:
+            while not self._stop_event.is_set():
+                event = await subscription.get()
+                if event.type == "memory.retrieved":
+                    memory_ids = event.payload.get("memory_ids", [])
+                    if memory_ids:
+                        try:
+                            async with self._uow.begin() as unit:
+                                assert unit.repositories is not None
+                                await unit.repositories.memory.update_memory_access(memory_ids)
+                        except Exception as e:
+                            LOG.exception(f"Failed to update memory access: {e}")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await subscription.close()
+
 
     async def run_recovery(self) -> None:
         """Recover tasks from interrupted states (e.g. after daemon crash)."""
@@ -140,6 +170,9 @@ class TaskQueue:
         LOG.info(f"Starting planning for task {task_id}")
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            project_id = str(task["project_id"]) if task and task.get("project_id") else None
+            
             await unit.repositories.tasks.update(task_id, status="planning", claimed_at=datetime.now(UTC).isoformat())
             await unit.repositories.tasks.insert_event(
                 task_id=task_id,
@@ -147,9 +180,15 @@ class TaskQueue:
                 message="Planning started",
                 payload={"status": "planning"}
             )
+            
+        memory_store = MemoryStore(self._uow)
+        context_str, memory_ids = await memory_store.get_planner_context(user_request, project_id=project_id)
+        
+        if memory_ids:
+            await self._event_bus.publish("memory.retrieved", {"memory_ids": memory_ids})
 
         try:
-            plan: PlannedTask = await self._planner.create_plan(user_request)
+            plan: PlannedTask = await self._planner.create_plan(user_request, memory_context=context_str)
             
             async with self._uow.begin() as unit:
                 assert unit.repositories is not None

@@ -54,10 +54,14 @@ class Planner:
     def __init__(self, model_router: ModelRouter) -> None:
         self._model_router = model_router
 
-    async def create_plan(self, user_request: str) -> PlannedTask:
+    async def create_plan(self, user_request: str, memory_context: str = "") -> PlannedTask:
         """Use the LLM to generate a plan for the user request."""
+        system_prompt = PLANNER_PROMPT
+        if memory_context:
+            system_prompt += f"\n\n{memory_context}"
+
         messages = [
-            Message(role="system", content=PLANNER_PROMPT),
+            Message(role="system", content=system_prompt),
             Message(role="user", content=f"Request: {user_request}\n\nPlan:"),
         ]
         
@@ -65,6 +69,7 @@ class Planner:
             messages=messages,
             temperature=0.0,  # Deterministic planning
         )
+
         
         response = await self._model_router.complete(request)
         content = response.message.content.strip()
