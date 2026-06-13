@@ -21,13 +21,21 @@ async def uow(tmp_path):
 def event_bus():
     return EventBus()
 
+from jarvis.tools.executor import ToolExecutor
+from jarvis.tools.registry import ToolRegistry
+
 @pytest.fixture
 def mock_planner():
     return MagicMock(spec=Planner)
 
 @pytest.fixture
-def task_queue(uow, event_bus, mock_planner):
-    return TaskQueue(uow, event_bus, mock_planner)
+def mock_tool_executor():
+    registry = ToolRegistry()
+    return ToolExecutor(registry)
+
+@pytest.fixture
+def task_queue(uow, event_bus, mock_planner, mock_tool_executor):
+    return TaskQueue(uow, event_bus, mock_planner, mock_tool_executor)
 
 async def test_task_lifecycle_planning_to_completed(task_queue, uow, mock_planner):
     # Setup mock plan
