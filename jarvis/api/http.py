@@ -425,6 +425,13 @@ def create_app(
     async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
         async with uow.begin() as unit:
             assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+            
+            if task["status"] != "waiting_for_plan_approval":
+                raise HTTPException(status_code=400, detail=f"Task is not waiting for plan approval (status: {task['status']})")
+                
             # Find the plan approval request
             cursor = await unit.connection.execute(
                 "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'plan' AND status = 'pending' LIMIT 1",
@@ -447,26 +454,6 @@ def create_app(
                 summary=f"Approved plan for task: {task_id}",
                 target=task_id,
                 task_id=task_id,
-            )
-        return JSONResponse({"approved": True})
-
-    @app.post("/v1/tasks/{task_id}/resume")
-    async def resume_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
-        async with uow.begin() as unit:
-            assert unit.repositories is not None
-            task = await unit.repositories.tasks.get(task_id)
-            if not task:
-                raise HTTPException(status_code=404, detail="Task not found.")
-            
-            if task["status"] not in ("paused", "failed"):
-                raise HTTPException(status_code=400, detail=f"Task cannot be resumed from status: {task['status']}")
-                
-            await unit.repositories.tasks.update(task_id, status="queued")
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                event_type="status_change",
-                message="Task resumed by user",
-                payload={"status": "queued"}
             )
         return JSONResponse({"approved": True})
 
