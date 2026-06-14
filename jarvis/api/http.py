@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 
 from jarvis import __version__
 from jarvis.api.schemas import (
+    ApprovalDecisionRequest,
+    ApprovalResponse,
     CurrentProjectUpdate,
     HealthResponse,
     MemoryApproveRequest,
@@ -33,6 +35,7 @@ from jarvis.api.schemas import (
     WorkspaceResponse,
 )
 from jarvis.api.websocket import authenticate_websocket
+from jarvis.approvals.broker import ApprovalBroker
 from jarvis.config.manager import load_config
 from jarvis.config.models import JarvisConfig
 from jarvis.config.secrets import SecretManager
@@ -44,10 +47,15 @@ from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
+from jarvis.tasks.command_runner import CommandRunner
 from jarvis.tasks.queue import TaskQueue
 from jarvis.tools.executor import ToolExecutor
 from jarvis.tools.registry import ToolRegistry
-from jarvis.tools.filesystem import ReadFileTool, WriteFileTool, ListDirectoryTool
+from jarvis.tools.filesystem import DeleteFileTool, ListDirectoryTool, PatchFileTool, ReadFileTool, RestoreFileTool, WriteFileTool
+from jarvis.tools.git import GitTool
+from jarvis.tools.test_runner import TestTool
+from jarvis.tools.build_runner import BuildTool
+from jarvis.tools.generic_command import GenericCommandTool
 from jarvis.tools.memory import SearchMemoryTool, CreateMemoryProposalTool
 from jarvis.tools.tasks import GetTaskStatusTool
 from jarvis.workspaces.registry import WorkspaceRegistry
@@ -72,18 +80,27 @@ def create_app(
     memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
     planner = Planner(model_router)
+    approval_broker = ApprovalBroker(uow, bus)
 
     # Tool System
     registry = ToolRegistry()
+    command_runner = CommandRunner()
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
+    registry.register(PatchFileTool())
+    registry.register(DeleteFileTool())
+    registry.register(RestoreFileTool())
     registry.register(ListDirectoryTool())
+    registry.register(GitTool(command_runner))
+    registry.register(TestTool(command_runner))
+    registry.register(BuildTool(command_runner))
+    registry.register(GenericCommandTool(command_runner))
     registry.register(SearchMemoryTool())
     registry.register(CreateMemoryProposalTool())
     registry.register(GetTaskStatusTool())
-    tool_executor = ToolExecutor(registry)
+    tool_executor = ToolExecutor(registry, approval_broker)
 
-    task_queue = TaskQueue(uow, bus, planner, tool_executor)
+    task_queue = TaskQueue(uow, bus, planner, tool_executor, approval_broker)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -111,6 +128,7 @@ def create_app(
     app.state.memory_store = memory_store
     app.state.model_router = model_router
     app.state.task_queue = task_queue
+    app.state.approval_broker = approval_broker
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -308,6 +326,41 @@ def create_app(
             raise HTTPException(status_code=404, detail="Memory not found.")
         return JSONResponse({"deleted": True})
 
+    # Approval Endpoints
+    @app.get("/v1/approvals", response_model=list[ApprovalResponse])
+    async def list_approvals(_: None = Depends(require_api_token)) -> list[ApprovalResponse]:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            rows = await unit.repositories.approvals.list_pending()
+            return [ApprovalResponse(**r) for r in rows]
+
+    @app.get("/v1/approvals/{approval_id}", response_model=ApprovalResponse)
+    async def get_approval(approval_id: str, _: None = Depends(require_api_token)) -> ApprovalResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            request = await unit.repositories.approvals.get(approval_id)
+            if not request:
+                raise HTTPException(status_code=404, detail="Approval request not found.")
+            return ApprovalResponse(**request)
+
+    @app.post("/v1/approvals/{approval_id}/approve")
+    async def approve_request(
+        approval_id: str, data: ApprovalDecisionRequest, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        success = await approval_broker.approve(approval_id, reason=data.reason)
+        if not success:
+            raise HTTPException(status_code=404, detail="Approval request not found.")
+        return JSONResponse({"approved": True})
+
+    @app.post("/v1/approvals/{approval_id}/deny")
+    async def deny_request(
+        approval_id: str, data: ApprovalDecisionRequest, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        success = await approval_broker.deny(approval_id, reason=data.reason)
+        if not success:
+            raise HTTPException(status_code=404, detail="Approval request not found.")
+        return JSONResponse({"denied": True})
+
     # Task Endpoints
     @app.post("/v1/tasks", response_model=TaskResponse, status_code=201)
     async def create_task(data: TaskCreate, _: None = Depends(require_api_token)) -> TaskResponse:
@@ -372,13 +425,15 @@ def create_app(
     async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
         async with uow.begin() as unit:
             assert unit.repositories is not None
-            task = await unit.repositories.tasks.get(task_id)
-            if not task:
-                raise HTTPException(status_code=404, detail="Task not found.")
-            
-            if task["status"] != "waiting_for_plan_approval":
-                raise HTTPException(status_code=400, detail=f"Task is not waiting for plan approval (status: {task['status']})")
-                
+            # Find the plan approval request
+            cursor = await unit.connection.execute(
+                "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'plan' AND status = 'pending' LIMIT 1",
+                (task_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                await approval_broker.approve(row["id"])
+
             await unit.repositories.tasks.update(task_id, status="queued")
             await unit.repositories.tasks.insert_event(
                 task_id=task_id,
@@ -391,6 +446,7 @@ def create_app(
                 action_type="task.plan_approve",
                 summary=f"Approved plan for task: {task_id}",
                 target=task_id,
+                task_id=task_id,
             )
         return JSONResponse({"approved": True})
 
@@ -412,6 +468,33 @@ def create_app(
                 message="Task resumed by user",
                 payload={"status": "queued"}
             )
+        return JSONResponse({"approved": True})
+
+    @app.post("/v1/tasks/{task_id}/resume")
+    async def resume_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            task = await unit.repositories.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found.")
+
+            if task["status"] not in ("paused", "failed"):
+                raise HTTPException(status_code=400, detail=f"Task cannot be resumed from status: {task['status']}")
+
+            await unit.repositories.tasks.update(task_id, status="queued")
+            await unit.repositories.tasks.insert_event(
+                task_id=task_id,
+                event_type="status_change",
+                message="Task resumed by user",
+                payload={"status": "queued"}
+            )
+            await unit.repositories.audit.insert(
+                actor="user",
+                action_type="task.resume",
+                summary=f"Resumed task: {task_id}",
+                target=task_id,
+                task_id=task_id,
+            )
         return JSONResponse({"resumed": True})
 
     @app.post("/v1/tasks/{task_id}/steps/{step_id}/approve", response_model=TaskStepResponse)
@@ -424,39 +507,25 @@ def create_app(
         """Approve a paused task step."""
         async with uow.begin() as unit:
             assert unit.repositories is not None
-            step = await unit.repositories.tasks.get_step(step_id)
-            if not step or step["task_id"] != task_id:
-                raise HTTPException(status_code=404, detail="Step not found")
-            
-            if step["status"] != "waiting_for_approval":
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Step is not waiting for approval (current status: {step['status']})"
-                )
+            # Find the tool approval request
+            cursor = await unit.connection.execute(
+                "SELECT id FROM approval_requests WHERE step_id = ? AND status = 'pending' LIMIT 1",
+                (step_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                await approval_broker.approve(row["id"], reason=data.reason)
                 
-            # 1. Update step status to 'approved'
+            # Update step and task status
             await unit.repositories.tasks.update_step(step_id, status="approved")
-            
-            # 2. Update task status to 'queued' to resume execution
             await unit.repositories.tasks.update(task_id, status="queued")
             
-            # 3. Insert events
             await unit.repositories.tasks.insert_event(
                 task_id=task_id,
                 step_id=step_id,
                 event_type="approval_granted",
-                message=f"Step approved: {step['title']}",
+                message="Step approved by user",
                 payload={"reason": data.reason}
-            )
-            
-            # 4. Audit
-            await unit.repositories.audit.insert(
-                actor="user",
-                action_type="task.step_approve",
-                summary=f"Approved task step: {step['title']}",
-                target=step_id,
-                details={"task_id": task_id, "reason": data.reason},
-                task_id=task_id,
             )
             
             updated_step = await unit.repositories.tasks.get_step(step_id)
@@ -473,67 +542,31 @@ def create_app(
         """Deny a paused task step, failing the task."""
         async with uow.begin() as unit:
             assert unit.repositories is not None
-            step = await unit.repositories.tasks.get_step(step_id)
-            if not step or step["task_id"] != task_id:
-                raise HTTPException(status_code=404, detail="Step not found")
-                
-            if step["status"] != "waiting_for_approval":
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Step is not waiting for approval (current status: {step['status']})"
-                )
-                
-            # 1. Update step status to 'failed'
+            # Find the approval request
+            cursor = await unit.connection.execute(
+                "SELECT id FROM approval_requests WHERE step_id = ? AND status = 'pending' LIMIT 1",
+                (step_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                await approval_broker.deny(row["id"], reason=data.reason)
+
+            # Update status
             error_msg = f"Denied by user: {data.reason}" if data.reason else "Denied by user."
             await unit.repositories.tasks.update_step(step_id, status="failed", error=error_msg)
-            
-            # 2. Update task status to 'failed'
             await unit.repositories.tasks.update(task_id, status="failed")
             
-            # 3. Insert events
             await unit.repositories.tasks.insert_event(
                 task_id=task_id,
                 step_id=step_id,
                 event_type="approval_denied",
-                message=f"Step denied: {step['title']}",
+                message="Step denied by user",
                 payload={"reason": data.reason}
-            )
-            
-            # 4. Audit
-            await unit.repositories.audit.insert(
-                actor="user",
-                action_type="task.step_deny",
-                summary=f"Denied task step: {step['title']}",
-                target=step_id,
-                details={"task_id": task_id, "reason": data.reason},
-                task_id=task_id,
             )
             
             updated_step = await unit.repositories.tasks.get_step(step_id)
             assert updated_step is not None
             return TaskStepResponse(**updated_step)
-            if not task:
-                raise HTTPException(status_code=404, detail="Task not found.")
-                
-            if task["status"] not in ("paused", "failed"):
-                raise HTTPException(status_code=400, detail=f"Cannot resume task in status: {task['status']}")
-                
-            # If a task has steps, it should go back to queued (or waiting for execution).
-            # TaskQueue looks for 'queued' tasks.
-            await unit.repositories.tasks.update(task_id, status="queued")
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                event_type="status_change",
-                message="Task resumed by user",
-                payload={"status": "queued"}
-            )
-            await unit.repositories.audit.insert(
-                actor="user",
-                action_type="task.resume",
-                summary=f"Resumed task: {task_id}",
-                target=task_id,
-            )
-        return JSONResponse({"resumed": True})
 
     @app.post("/v1/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
