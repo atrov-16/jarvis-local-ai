@@ -688,6 +688,83 @@ class TaskRepository:
         return [dict(row) for row in rows]
 
 
+class ApprovalRepository:
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def insert(
+        self,
+        *,
+        id: str | None = None,
+        task_id: str | None = None,
+        step_id: str | None = None,
+        action_type: str,
+        risk_level: str,
+        summary: str,
+        action_json: str,
+        action_hash: str,
+        context_id: str | None = None,
+        status: str = "pending",
+        expires_at: str | None = None,
+    ) -> str:
+        approval_id = id or str(uuid4())
+        await self._connection.execute(
+            """
+            INSERT INTO approval_requests (
+                id, task_id, step_id, action_type, risk_level, summary, 
+                action_json, action_hash, context_id, status, created_at, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                step_id,
+                action_type,
+                risk_level,
+                summary,
+                action_json,
+                action_hash,
+                context_id,
+                status,
+                _now(),
+                expires_at,
+            ),
+        )
+        return approval_id
+
+    async def get(self, approval_id: str) -> dict[str, Any] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_pending(self) -> list[dict[str, Any]]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM approval_requests WHERE status = 'pending' ORDER BY created_at ASC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def update_status(
+        self,
+        approval_id: str,
+        status: str,
+        decided_by: str | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        cursor = await self._connection.execute(
+            """
+            UPDATE approval_requests 
+            SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ? 
+            WHERE id = ?
+            """,
+            (status, _now(), decided_by, reason, approval_id),
+        )
+        return cursor.rowcount > 0
+
+
 class StorageRepositories:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self.app_state = AppStateRepository(connection)
@@ -696,6 +773,7 @@ class StorageRepositories:
         self.projects = ProjectRepository(connection)
         self.memory = MemoryRepository(connection)
         self.tasks = TaskRepository(connection)
+        self.approvals = ApprovalRepository(connection)
 
 
 def _now() -> str:
