@@ -34,8 +34,13 @@ def mock_tool_executor():
     return ToolExecutor(registry)
 
 @pytest.fixture
-def task_queue(uow, event_bus, mock_planner, mock_tool_executor):
-    return TaskQueue(uow, event_bus, mock_planner, mock_tool_executor)
+def approval_broker(uow, event_bus):
+    from jarvis.approvals.broker import ApprovalBroker
+    return ApprovalBroker(uow, event_bus)
+
+@pytest.fixture
+def task_queue(uow, event_bus, mock_planner, mock_tool_executor, approval_broker):
+    return TaskQueue(uow, event_bus, mock_planner, mock_tool_executor, approval_broker)
 
 async def test_task_lifecycle_planning_to_completed(task_queue, uow, mock_planner):
     # Setup mock plan
