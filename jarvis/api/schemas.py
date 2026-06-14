@@ -153,3 +153,25 @@ class TaskDetailResponse(TaskResponse):
 class TaskDecisionRequest(BaseModel):
     reason: str | None = Field(None, description="Optional reason for the decision.")
 
+
+class ApprovalResponse(BaseModel):
+    id: str
+    task_id: str | None = None
+    step_id: str | None = None
+    action_type: str
+    risk_level: str
+    summary: str
+    action_json: str
+    action_hash: str
+    context_id: str | None = None
+    status: str
+    created_at: str
+    decided_at: str | None = None
+    decided_by: str | None = None
+    decision_reason: str | None = None
+    expires_at: str | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    reason: str | None = Field(None, description="Optional reason for the decision.")
+

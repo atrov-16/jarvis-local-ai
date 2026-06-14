@@ -8,6 +8,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from jarvis.approvals.broker import ApprovalBroker
+from jarvis.approvals.models import ApprovalActionType, ProposedAction, RiskLevel
 from jarvis.core.event_bus import EventBus
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
@@ -29,11 +31,13 @@ class TaskQueue:
         event_bus: EventBus, 
         planner: Planner,
         tool_executor: ToolExecutor,
+        approval_broker: ApprovalBroker,
     ) -> None:
         self._uow = uow
         self._event_bus = event_bus
         self._planner = planner
         self._tool_executor = tool_executor
+        self._approval_broker = approval_broker
         self._worker_task: asyncio.Task[None] | None = None
         self._event_listener_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -209,6 +213,17 @@ class TaskQueue:
                     status="waiting_for_plan_approval",
                     title=plan.title
                 )
+                
+                # Create a centralized approval request for the plan
+                proposed_plan = ProposedAction(
+                    action_type=ApprovalActionType.PLAN,
+                    summary=f"Approve plan: {plan.title}",
+                    action_json=plan.model_dump_json(),
+                    task_id=task_id,
+                    risk_level=RiskLevel.MEDIUM
+                )
+                await self._approval_broker.create_request(proposed_plan, unit=unit)
+
                 await unit.repositories.tasks.insert_event(
                     task_id=task_id,
                     event_type="status_change",
@@ -333,33 +348,52 @@ class TaskQueue:
                 await unit.repositories.tasks.update_step(step_id, status="failed", error=f"Tool not found: {tool_name}")
                 return False
 
-            # Check for Approval Requirement
-            needs_approval = bool(current_step["requires_approval"])
+            # Unified Risk Classification
+            proposed_action = ProposedAction(
+                action_type=ApprovalActionType.TOOL,
+                summary=f"Execute tool: {tool_name} ({step['title']})",
+                action_json=step["input_json"] or "{}",
+                task_id=task_id,
+                step_id=step_id,
+                context_id=project_id,
+            )
             
-            # If not already flagged by LLM, check workspace policy for mutating tools
-            if not needs_approval and tool_category == ToolCategory.MUTATING and project_id:
-                workspaces = await unit.repositories.projects.list_workspaces(project_id)
-                for ws in workspaces:
-                    if ws["write_policy"] == "approval_required":
-                        needs_approval = True
-                        break
+            # Simple workspace check for now
+            is_outside = False # Placeholder for path-level checks
+            risk_level = await self._approval_broker.get_risk_level(proposed_action, tool_category, is_outside)
+            
+            # Always respect the planner's flag if it's set to True
+            needs_approval = (risk_level != RiskLevel.LOW) or bool(current_step["requires_approval"])
 
-            # If we need approval and haven't gotten it yet.
-            # We skip the pause if the status is already 'running' OR 'approved'.
-            # 'approved' means the user just approved this step via the API.
-            if needs_approval and current_step["status"] not in ("running", "approved"):
-                await unit.repositories.tasks.update_step(step_id, status="waiting_for_approval")
-                await unit.repositories.tasks.insert_event(
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type="approval_requested",
-                    message=f"Step '{step['title']}' requires approval.",
-                    payload={"status": "waiting_for_approval"}
+            approval_request_id = None
+            if needs_approval:
+                # Check for existing approval request
+                cursor = await unit.connection.execute(
+                    "SELECT id, status FROM approval_requests WHERE step_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (step_id,)
                 )
-                # Halt task execution for this task
-                if task["status"] == "running":
-                    await unit.repositories.tasks.update(task_id, status="paused")
-                return False
+                approval_req = await cursor.fetchone()
+                
+                if not approval_req or approval_req["status"] != "approved":
+                    if not approval_req or approval_req["status"] in ("denied", "expired", "cancelled"):
+                        # Create new request if none exists or previous was not approved
+                        proposed_action.risk_level = risk_level
+                        await self._approval_broker.create_request(proposed_action, unit=unit)
+                    
+                    await unit.repositories.tasks.update_step(step_id, status="waiting_for_approval")
+                    await unit.repositories.tasks.insert_event(
+                        task_id=task_id,
+                        step_id=step_id,
+                        event_type="approval_requested",
+                        message=f"Step '{step['title']}' requires approval (Risk: {risk_level.value}).",
+                        payload={"status": "waiting_for_approval", "risk_level": risk_level.value}
+                    )
+                    # Halt task execution
+                    if task["status"] == "running":
+                        await unit.repositories.tasks.update(task_id, status="paused")
+                    return False
+                
+                approval_request_id = approval_req["id"]
 
             # 2. Mark step as running (if not already)
             await unit.repositories.tasks.update_step(
@@ -393,6 +427,7 @@ class TaskQueue:
         result = await self._tool_executor.execute_step(
             tool_name=tool_name,
             input_json=step["input_json"],
+            approval_request_id=approval_request_id,
             **context
         )
         
@@ -409,7 +444,8 @@ class TaskQueue:
                     task_id=task_id,
                     step_id=step_id,
                     event_type="step_completed",
-                    message=f"Completed step: {step['title']}"
+                    message=f"Completed step: {step['title']}",
+                    payload={"execution_time": result.execution_time}
                 )
                 return True
             else:
@@ -423,6 +459,6 @@ class TaskQueue:
                     step_id=step_id,
                     event_type="step_failed",
                     message=f"Step failed: {result.error}",
-                    payload={"error": result.error}
+                    payload={"error": result.error, "timeout": result.timeout_occurred}
                 )
                 return False

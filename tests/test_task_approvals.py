@@ -74,6 +74,7 @@ async def test_mutating_tool_requires_approval_by_policy(client, uow, registry, 
         name = "mutating_tool"
         description = "Mutates things"
         category = ToolCategory.MUTATING
+        timeout_seconds = 60
         def get_input_schema(self):
             return MutatingInput
         async def execute(self, **kwargs):
@@ -163,6 +164,7 @@ async def test_step_denial_fails_task(client, uow, registry, mock_planner):
             name = "mutating_tool_2"
             description = "Mutates things"
             category = ToolCategory.MUTATING
+            timeout_seconds = 60
             def get_input_schema(self):
                 return MutatingInput
             async def execute(self, **kwargs):

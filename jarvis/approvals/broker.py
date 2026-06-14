@@ -9,7 +9,7 @@ from typing import Any
 
 from jarvis.approvals.models import ApprovalActionType, ProposedAction, RiskLevel
 from jarvis.core.event_bus import EventBus
-from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.storage.unit_of_work import UnitOfWork, UnitOfWorkScope
 from jarvis.tools.base import ToolCategory
 
 LOG = logging.getLogger(__name__)
@@ -57,36 +57,42 @@ class ApprovalBroker:
         encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    async def create_request(self, action: ProposedAction) -> str:
+    async def create_request(self, action: ProposedAction, unit: UnitOfWorkScope | None = None) -> str:
         """Create a new approval request."""
         action_hash = self.compute_hash(action.action_type, action.action_json, action.context_id)
         
-        async with self._uow.begin() as unit:
-            assert unit.repositories is not None
-            approval_id = await unit.repositories.approvals.insert(
-                task_id=action.task_id,
-                step_id=action.step_id,
-                action_type=action.action_type,
-                risk_level=action.risk_level,
-                summary=action.summary,
-                action_json=action.action_json,
-                action_hash=action_hash,
-                context_id=action.context_id,
-            )
+        if unit:
+            return await self._create_request_in_unit(action, action_hash, unit)
             
-            await unit.repositories.audit.insert(
-                actor="system",
-                action_type="approval.request_created",
-                summary=f"Approval requested for {action.action_type}: {action.summary}",
-                target=approval_id,
-                details={
-                    "risk_level": action.risk_level,
-                    "action_type": action.action_type,
-                },
-                task_id=action.task_id,
-                approval_request_id=approval_id,
-            )
-            
+        async with self._uow.begin() as unit_new:
+            return await self._create_request_in_unit(action, action_hash, unit_new)
+
+    async def _create_request_in_unit(self, action: ProposedAction, action_hash: str, unit: UnitOfWorkScope) -> str:
+        assert unit.repositories is not None
+        approval_id = await unit.repositories.approvals.insert(
+            task_id=action.task_id,
+            step_id=action.step_id,
+            action_type=action.action_type,
+            risk_level=action.risk_level,
+            summary=action.summary,
+            action_json=action.action_json,
+            action_hash=action_hash,
+            context_id=action.context_id,
+        )
+        
+        await unit.repositories.audit.insert(
+            actor="system",
+            action_type="approval.request_created",
+            summary=f"Approval requested for {action.action_type}: {action.summary}",
+            target=approval_id,
+            details={
+                "risk_level": action.risk_level,
+                "action_type": action.action_type,
+            },
+            task_id=action.task_id,
+            approval_request_id=approval_id,
+        )
+        
         await self._event_bus.publish("approval.created", {"id": approval_id, "summary": action.summary})
         return approval_id
 
