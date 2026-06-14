@@ -14,6 +14,8 @@ class ToolCategory(str, Enum):
     """Categories for tool classification and policy enforcement."""
     READ_ONLY = "read_only"
     MUTATING = "mutating"
+    DESTRUCTIVE = "destructive"
+    SYSTEM = "system"
     EXTERNAL = "external"
 
 
@@ -23,6 +25,8 @@ class ToolResult:
     success: bool
     data: Any = None
     error: str | None = None
+    execution_time: float | None = None
+    timeout_occurred: bool = False
 
 
 class BaseTool(ABC):
@@ -33,10 +37,12 @@ class BaseTool(ABC):
         name: str,
         description: str,
         category: ToolCategory,
+        timeout_seconds: int = 60,
     ) -> None:
         self.name = name
         self.description = description
         self.category = category
+        self.timeout_seconds = timeout_seconds
 
     @abstractmethod
     def get_input_schema(self) -> Type[BaseModel]:
