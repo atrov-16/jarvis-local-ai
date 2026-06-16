@@ -64,16 +64,49 @@ class MemoryResponse(BaseModel):
     content: str
     tags: list[str] = Field(default_factory=list)
     source: str
+    status: str
     importance: float = 0.5
+    confidence_score: float = 1.0
     access_count: int = 0
     last_retrieved_at: str | None = None
     source_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
 
 class MemorySearchResultResponse(MemoryResponse):
     relevance_score: float
+
+
+class MemoryHealthMetrics(BaseModel):
+    access_count: int
+    confidence_score: float
+    importance: float
+    merge_count: int
+    conflict_count: int
+    last_retrieved_at: str | None
+
+
+class LineageNode(BaseModel):
+    id: str
+    type: str  # "task", "memory", "reflection", "proposal"
+    summary: str
+    timestamp: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+    children: list[LineageNode] = Field(default_factory=list)
+
+
+class MemoryDetailResponse(MemoryResponse):
+    metrics: MemoryHealthMetrics
+    lineage: list[LineageNode] = Field(default_factory=list)
+
+
+class ConflictResolveRequest(BaseModel):
+    action: str = Field(..., pattern="^(pick_winner|merge_manual|ignore)$")
+    winner_id: str | None = None
+    conflicting_ids: list[str] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class MemoryProposalResponse(BaseModel):
@@ -86,7 +119,9 @@ class MemoryProposalResponse(BaseModel):
     reason: str
     status: str
     importance: float = 0.5
+    confidence_score: float = 1.0
     source_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     created_at: str
     decided_at: str | None = None
 
@@ -145,6 +180,31 @@ class TaskResponse(BaseModel):
     claimed_at: str | None = None
 
 
+class TraceEntry(BaseModel):
+    timestamp: str
+    type: str  # "event", "step", "audit", "approval", "memory"
+    actor: str
+    severity: str = "info" # "info", "warning", "error", "critical"
+    summary: str
+    details: dict[str, object] = Field(default_factory=dict)
+    step_id: str | None = None
+    correlation_id: str | None = None
+
+
+class TaskTraceResponse(BaseModel):
+    task_id: str
+    entries: list[TraceEntry]
+
+
+class TaskSummaryResponse(BaseModel):
+    task_id: str
+    status: str
+    summary: str | None = None
+    outcome: str | None = None
+    tokens_used: int | None = None
+    wall_time: str | None = None
+
+
 class TaskDetailResponse(TaskResponse):
     steps: list[TaskStepResponse] = Field(default_factory=list)
     events: list[TaskEventResponse] = Field(default_factory=list)
@@ -152,6 +212,35 @@ class TaskDetailResponse(TaskResponse):
 
 class TaskDecisionRequest(BaseModel):
     reason: str | None = Field(None, description="Optional reason for the decision.")
+
+class UnifiedApprovalItem(BaseModel):
+    id: str
+    type: str  # "action", "memory", "consolidation"
+    subtype: str | None = None  # e.g., "tool", "plan", "fact", "merge"
+    summary: str
+    risk_level: str = "medium"
+    status: str = "pending"
+    task_id: str | None = None
+    created_at: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class BulkApprovalItem(BaseModel):
+    id: str
+    type: str
+
+
+class BulkApprovalRequest(BaseModel):
+    action: str = Field(..., pattern="^(approve|deny)$")
+    items: list[BulkApprovalItem]
+    reason: str | None = None
+
+
+class ApprovalStats(BaseModel):
+    pending_count: int
+    avg_decision_time_sec: float | None = None
+    by_risk: dict[str, int] = Field(default_factory=dict)
+    approval_rate: float | None = None
 
 
 class ApprovalResponse(BaseModel):

@@ -70,7 +70,9 @@ class CreateMemoryProposalInput(BaseModel):
     tags: List[str] = Field(default_factory=list, description="Optional tags.")
     reason: str = Field(..., description="Why this memory is worth saving.")
     importance: float = Field(0.5, description="Base importance score from 0.0 to 1.0.")
+    confidence_score: float = Field(1.0, description="Confidence score from 0.0 to 1.0.")
     source_ids: List[str] = Field(default_factory=list, description="IDs of tasks or memories that justify this proposal.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional source lineage metadata.")
 
 
 class CreateMemoryProposalTool(BaseTool):
@@ -104,7 +106,9 @@ class CreateMemoryProposalTool(BaseTool):
                 proposed_tags=kwargs.get("tags"),
                 reason=kwargs["reason"],
                 importance=kwargs.get("importance", 0.5),
+                confidence_score=kwargs.get("confidence_score", 1.0),
                 source_ids=kwargs.get("source_ids"),
+                metadata=kwargs.get("metadata"),
             )
 
             

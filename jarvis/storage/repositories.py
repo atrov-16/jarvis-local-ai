@@ -347,16 +347,19 @@ class MemoryRepository:
         proposed_tags: list[str] | None = None,
         reason: str,
         importance: float = 0.5,
+        confidence_score: float = 1.0,
         source_ids: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> str:
         proposal_id = id or str(uuid4())
         await self._connection.execute(
             """
             INSERT INTO memory_proposals (
                 id, project_id, task_id, memory_type, proposed_content, 
-                proposed_tags_json, reason, importance, source_ids_json, created_at
+                proposed_tags_json, reason, status, importance, confidence_score, 
+                source_ids_json, metadata_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
             """,
             (
                 proposal_id,
@@ -367,7 +370,9 @@ class MemoryRepository:
                 json.dumps(proposed_tags or []),
                 reason,
                 importance,
+                confidence_score,
                 json.dumps(source_ids or []),
+                json.dumps(metadata or {}),
                 _now(),
             ),
         )
@@ -382,6 +387,7 @@ class MemoryRepository:
             data = dict(row)
             data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json", "[]")))
             data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
+            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
             return data
         return None
 
@@ -405,8 +411,11 @@ class MemoryRepository:
         content: str,
         tags: list[str] | None = None,
         source: str,
+        status: str = "active",
         importance: float = 0.5,
+        confidence_score: float = 1.0,
         source_ids: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> str:
         memory_id = id or str(uuid4())
         now = _now()
@@ -414,9 +423,10 @@ class MemoryRepository:
             """
             INSERT INTO long_term_memory (
                 id, project_id, task_id, memory_type, title, content, 
-                tags_json, source, importance, source_ids_json, created_at, updated_at
+                tags_json, source, status, importance, confidence_score, 
+                source_ids_json, metadata_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
@@ -427,8 +437,11 @@ class MemoryRepository:
                 content,
                 json.dumps(tags or []),
                 source,
+                status,
                 importance,
+                confidence_score,
                 json.dumps(source_ids or []),
+                json.dumps(metadata or {}),
                 now,
                 now,
             ),
@@ -444,6 +457,7 @@ class MemoryRepository:
             data = dict(row)
             data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
             data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
+            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
             return data
         return None
 
@@ -453,7 +467,9 @@ class MemoryRepository:
         *,
         project_id: str | None = None,
         memory_type: str | None = None,
+        status: str | None = "active",
         limit: int = 50,
+        offset: int = 0
     ) -> list[dict[str, object]]:
         sql = """
             SELECT m.*, rank
@@ -470,9 +486,13 @@ class MemoryRepository:
         if memory_type:
             sql += " AND m.memory_type = ?"
             params.append(memory_type)
+            
+        if status:
+            sql += " AND m.status = ?"
+            params.append(status)
 
-        sql += " ORDER BY rank LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY rank LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
 
         cursor = await self._connection.execute(sql, tuple(params))
         rows = await cursor.fetchall()
@@ -481,6 +501,98 @@ class MemoryRepository:
             data = dict(row)
             data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
             data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
+            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            results.append(data)
+        return results
+
+    async def update_long_term(self, memory_id: str, **kwargs: object) -> bool:
+        if not kwargs:
+            return False
+        
+        allowed_keys = {"status", "title", "content", "importance", "confidence_score", "metadata_json", "archived_at"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        if not filtered_kwargs:
+            return False
+
+        set_clause = ", ".join([f"{k} = ?" for k in filtered_kwargs.keys()])
+        values = list(filtered_kwargs.values())
+        values.append(_now())
+        values.append(memory_id)
+
+        cursor = await self._connection.execute(
+            f"UPDATE long_term_memory SET {set_clause}, updated_at = ? WHERE id = ?",
+            tuple(values),
+        )
+        return cursor.rowcount > 0
+
+    async def list_long_term(
+        self, 
+        *, 
+        project_id: str | None = None, 
+        status: str | None = "active",
+        memory_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM long_term_memory WHERE 1=1"
+        params: list[object] = []
+        
+        if project_id:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+            
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+
+        if memory_type:
+            sql += " AND memory_type = ?"
+            params.append(memory_type)
+            
+        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor = await self._connection.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            data = dict(row)
+            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
+            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
+            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            results.append(data)
+        return results
+
+    async def list_proposals(
+        self, 
+        *, 
+        project_id: str | None = None, 
+        status: str | None = "pending",
+        limit: int = 50,
+        offset: int = 0
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM memory_proposals WHERE 1=1"
+        params: list[object] = []
+        
+        if project_id:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+            
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+            
+        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor = await self._connection.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            data = dict(row)
+            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json", "[]")))
+            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
+            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
             results.append(data)
         return results
 
@@ -661,12 +773,17 @@ class TaskRepository:
         event_type: str,
         message: str | None = None,
         payload: dict[str, object] | None = None,
+        severity: str = "info",
+        correlation_id: str | None = None,
     ) -> str:
         event_id = id or str(uuid4())
         await self._connection.execute(
             """
-            INSERT INTO task_events (id, task_id, step_id, event_type, message, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO task_events (
+                id, task_id, step_id, event_type, message, 
+                payload_json, severity, correlation_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -675,6 +792,8 @@ class TaskRepository:
                 event_type,
                 message,
                 json.dumps(payload or {}),
+                severity,
+                correlation_id,
                 _now(),
             ),
         )
@@ -740,12 +859,47 @@ class ApprovalRepository:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
-    async def list_pending(self) -> list[dict[str, Any]]:
-        cursor = await self._connection.execute(
-            "SELECT * FROM approval_requests WHERE status = 'pending' ORDER BY created_at ASC"
-        )
+    async def list_all(
+        self, 
+        *, 
+        status: str | None = None, 
+        action_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM approval_requests WHERE 1=1"
+        params: list[object] = []
+
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+
+        if action_type:
+            sql += " AND action_type = ?"
+            params.append(action_type)
+
+        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor = await self._connection.execute(sql, tuple(params))
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def get_stats(self) -> dict[str, object]:
+        cursor = await self._connection.execute(
+            """
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+                SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END) as denied,
+                AVG(CASE WHEN status != 'pending' THEN (julianday(decided_at) - julianday(created_at)) * 86400 ELSE NULL END) as avg_time
+            FROM approval_requests
+            """
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else {}
+
 
     async def update_status(
         self,

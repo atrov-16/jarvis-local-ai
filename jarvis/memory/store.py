@@ -19,10 +19,13 @@ class MemorySearchResult:
     content: str
     tags: list[str]
     source: str
+    status: str
     importance: float
+    confidence_score: float
     access_count: int
     last_retrieved_at: str | None
     source_ids: list[str]
+    metadata: dict[str, Any]
     relevance_score: float
     created_at: str
     updated_at: str
@@ -42,7 +45,9 @@ class MemoryStore:
         proposed_tags: list[str] | None = None,
         reason: str,
         importance: float = 0.5,
+        confidence_score: float = 1.0,
         source_ids: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> str:
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
@@ -54,14 +59,21 @@ class MemoryStore:
                 proposed_tags=proposed_tags,
                 reason=reason,
                 importance=importance,
+                confidence_score=confidence_score,
                 source_ids=source_ids,
+                metadata=metadata,
             )
             await unit.repositories.audit.insert(
                 actor="system",
                 action_type="memory.propose",
-                summary=f"Proposed new {memory_type} memory",
+                summary=f"Proposed new {memory_type} memory (confidence: {confidence_score:.2f})",
                 target=proposal_id,
-                details={"memory_type": memory_type, "reason": reason},
+                details={
+                    "memory_type": memory_type, 
+                    "reason": reason, 
+                    "confidence_score": confidence_score
+                },
+                task_id=task_id,
             )
             return proposal_id
 
@@ -92,6 +104,7 @@ class MemoryStore:
                 source="proposal_promotion",
                 importance=float(proposal.get("importance", 0.5)),
                 source_ids=proposal.get("source_ids", []),
+                metadata=proposal.get("metadata", {}),
             )
 
             # 3. Audit
@@ -102,6 +115,34 @@ class MemoryStore:
                 target=memory_id,
                 details={"proposal_id": proposal_id},
             )
+
+            # 4. Handle consolidation merges
+            metadata = proposal.get("metadata", {})
+            if metadata.get("type") == "consolidation_merge":
+                merged_ids = metadata.get("merged_ids", [])
+                for m_id in merged_ids:
+                    await unit.repositories.memory.update_long_term_status(m_id, "merged")
+                    await unit.repositories.audit.insert(
+                        actor="system",
+                        action_type="memory.merge",
+                        summary=f"Memory {m_id} marked as merged into {memory_id}",
+                        target=m_id,
+                        details={"merged_into": memory_id}
+                    )
+
+            # 5. Handle consolidation conflicts
+            if metadata.get("type") == "consolidation_conflict":
+                conflicting_ids = metadata.get("conflicting_ids", [])
+                for c_id in conflicting_ids:
+                    await unit.repositories.memory.update_long_term_status(c_id, "flagged")
+                    await unit.repositories.audit.insert(
+                        actor="system",
+                        action_type="memory.flag",
+                        summary=f"Memory {c_id} flagged due to conflict",
+                        target=c_id,
+                        details={"conflict_reason": metadata.get("reason")}
+                    )
+
             return memory_id
 
     async def deny(self, proposal_id: str, reason: str | None = None) -> bool:
@@ -144,6 +185,7 @@ class MemoryStore:
         query: str,
         *,
         project_id: str | None = None,
+        task_id: str | None = None,
     ) -> tuple[str, list[str]]:
         """Retrieve, rank, and budget memories for planner context injection."""
         async with self._uow.begin() as unit:
@@ -205,7 +247,7 @@ class MemoryStore:
         selected_memories = []
         memory_ids = []
         
-        for _, r in ranked_results:
+        for score, r in ranked_results:
             m_type = str(r["memory_type"])
             content = str(r["content"])
             m_id = str(r["id"])
@@ -229,6 +271,27 @@ class MemoryStore:
             used_total += entry_len
             selected_memories.append(entry_str)
             memory_ids.append(m_id)
+
+            # Log individual retrieval event if task_id is provided
+            if task_id:
+                try:
+                    async with self._uow.begin() as unit:
+                        assert unit.repositories is not None
+                        await unit.repositories.tasks.insert_event(
+                            task_id=task_id,
+                            event_type="memory_retrieved",
+                            message=f"Retrieved {m_type} memory: {content[:50]}...",
+                            payload={
+                                "memory_id": m_id,
+                                "memory_type": m_type,
+                                "retrieval_score": score,
+                                "project_scoped": bool(r.get("project_id"))
+                            }
+                        )
+                except Exception as e:
+                    # Non-critical, just log warning
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to log memory retrieval event: {e}")
             
         if not selected_memories:
             return "", []
@@ -238,18 +301,21 @@ class MemoryStore:
         
         return context_str, memory_ids
 
+
     async def search(
         self,
         query: str,
         *,
         project_id: str | None = None,
         memory_type: str | None = None,
+        status: str | None = "active",
         limit: int = 20,
+        offset: int = 0,
     ) -> list[MemorySearchResult]:
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
             raw_results = await unit.repositories.memory.search_long_term(
-                query, project_id=project_id, memory_type=memory_type, limit=limit
+                query, project_id=project_id, memory_type=memory_type, status=status, limit=limit, offset=offset
             )
             
             return [
@@ -261,13 +327,30 @@ class MemoryStore:
                     content=str(r["content"]),
                     tags=r["tags"], # type: ignore
                     source=str(r["source"]),
+                    status=str(r["status"]),
                     importance=float(r.get("importance", 0.5)),
+                    confidence_score=float(r.get("confidence_score", 1.0)),
                     access_count=int(r.get("access_count", 0)),
                     last_retrieved_at=str(r["last_retrieved_at"]) if r.get("last_retrieved_at") else None,
                     source_ids=r.get("source_ids", []), # type: ignore
-                    relevance_score=float(r["rank"]),
+                    metadata=r.get("metadata", {}), # type: ignore
+                    relevance_score=float(r.get("rank", 0.0)),
                     created_at=str(r["created_at"]),
                     updated_at=str(r["updated_at"]),
                 )
                 for r in raw_results
             ]
+
+    async def update_status(self, memory_id: str, status: str) -> bool:
+        async with self._uow.begin() as unit:
+            assert unit.repositories is not None
+            updated = await unit.repositories.memory.update_long_term_status(memory_id, status)
+            if updated:
+                await unit.repositories.audit.insert(
+                    actor="system",
+                    action_type="memory.status_update",
+                    summary=f"Updated memory {memory_id} status to {status}",
+                    target=memory_id,
+                    details={"status": status},
+                )
+            return updated

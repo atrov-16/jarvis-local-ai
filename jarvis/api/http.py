@@ -15,10 +15,12 @@ from jarvis import __version__
 from jarvis.api.schemas import (
     ApprovalDecisionRequest,
     ApprovalResponse,
+    ConflictResolveRequest,
     CurrentProjectUpdate,
     HealthResponse,
     MemoryApproveRequest,
     MemoryDenialRequest,
+    MemoryDetailResponse,
     MemoryProposalResponse,
     MemoryResponse,
     MemorySearchResultResponse,
@@ -31,15 +33,24 @@ from jarvis.api.schemas import (
     TaskDetailResponse,
     TaskStepResponse,
     TaskEventResponse,
+    TaskTraceResponse,
+    TaskSummaryResponse,
+    UnifiedApprovalItem,
+    BulkApprovalRequest,
+    ApprovalStats,
     WorkspaceCreate,
     WorkspaceResponse,
 )
 from jarvis.api.websocket import authenticate_websocket
+from jarvis.api.services.trace import TraceService
+from jarvis.api.services.memory_browser import MemoryBrowserService
+from jarvis.api.services.approval_center import ApprovalCenterService
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.config.manager import load_config
 from jarvis.config.models import JarvisConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
+from jarvis.core.reflection import ReflectionService
 from jarvis.models.router import ModelRouter
 from jarvis.memory.store import MemoryStore
 from jarvis.projects.registry import ProjectRegistry
@@ -81,6 +92,10 @@ def create_app(
     model_router = ModelRouter(jarvis_config, secrets)
     planner = Planner(model_router)
     approval_broker = ApprovalBroker(uow, bus)
+    reflection_service = ReflectionService(uow, bus, model_router, memory_store)
+    trace_service = TraceService(uow, model_router)
+    memory_browser = MemoryBrowserService(uow, memory_store)
+    approval_center = ApprovalCenterService(uow, approval_broker, memory_store)
 
     # Tool System
     registry = ToolRegistry()
@@ -111,12 +126,14 @@ def create_app(
             "migrations_applied": applied,
         }
         
-        # Start background worker
+        # Start background services
         await task_queue.start()
+        await reflection_service.start()
         
         yield
         
-        # Stop background worker
+        # Stop background services
+        await reflection_service.stop()
         await task_queue.stop()
 
     app = FastAPI(title="Jarvis", version=__version__, lifespan=lifespan)
@@ -216,6 +233,24 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    # Approval Center Endpoints
+    @app.get("/v1/approvals/center", response_model=list[UnifiedApprovalItem])
+    async def list_unified_approvals(
+        limit: int = 50, offset: int = 0, _: None = Depends(require_api_token)
+    ) -> list[UnifiedApprovalItem]:
+        return await approval_center.list_pending(limit=limit, offset=offset)
+
+    @app.post("/v1/approvals/bulk")
+    async def bulk_approval(
+        data: BulkApprovalRequest, _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        results = await approval_center.bulk_respond(data)
+        return JSONResponse(results)
+
+    @app.get("/v1/approvals/stats", response_model=ApprovalStats)
+    async def get_approval_stats(_: None = Depends(require_api_token)) -> ApprovalStats:
+        return await approval_center.get_stats()
+
     # Workspace Linking
     @app.post("/v1/projects/{project_id}/workspaces/{workspace_id}")
     async def link_workspace(
@@ -236,88 +271,93 @@ def create_app(
             raise HTTPException(status_code=404, detail="Link not found.")
         return JSONResponse({"unlinked": True})
 
-    # Memory Endpoints
-    @app.get("/v1/memory/search", response_model=list[MemorySearchResultResponse])
-    async def search_memory(
-        q: str,
+    # Memory Browser & Proposal Endpoints
+    @app.get("/v1/memories/proposals", response_model=list[MemoryProposalResponse])
+    async def list_memory_proposals(
         project_id: str | None = None,
-        memory_type: str | None = None,
-        limit: int = 20,
-        _: None = Depends(require_api_token),
-    ) -> list[MemorySearchResultResponse]:
-        results = await memory_store.search(
-            query=q, project_id=project_id, memory_type=memory_type, limit=limit
-        )
-        return [MemorySearchResultResponse(**r.__dict__) for r in results]
+        status: str = "pending",
+        limit: int = 50,
+        offset: int = 0,
+        _: None = Depends(require_api_token)
+    ) -> list[MemoryProposalResponse]:
+        return await memory_browser.list_proposals(project_id=project_id, status=status, limit=limit, offset=offset)
 
-    @app.get("/v1/memory/proposals", response_model=list[MemoryProposalResponse])
-    async def list_proposals(_: None = Depends(require_api_token)) -> list[MemoryProposalResponse]:
-        async with uow.begin() as unit:
-            assert unit.repositories is not None
-            # We don't have a list_proposals in MemoryStore yet, let's use the repository directly
-            # or add it to MemoryStore. Designing to use Store is better.
-            # I'll add a list_proposals to MemoryStore or just use Repository for now.
-            # Actually, the requirement said "Keep business logic inside MemoryStore".
-            # I will quickly check if I should add it to Store.
-            cursor = await unit.repositories.memory._connection.execute(
-                "SELECT * FROM memory_proposals WHERE status = 'pending'"
-            )
-            rows = await cursor.fetchall()
-            proposals = []
-            for row in rows:
-                data = dict(row)
-                data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json")))
-                proposals.append(MemoryProposalResponse(**data))
-            return proposals
+    @app.get("/v1/memories/proposals/{proposal_id}", response_model=MemoryProposalResponse)
+    async def get_memory_proposal(proposal_id: str, _: None = Depends(require_api_token)) -> MemoryProposalResponse:
+        try:
+            return await memory_browser.get_proposal(proposal_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
-    @app.post("/v1/memory/proposals/{proposal_id}/approve")
-    async def approve_proposal(
+    @app.post("/v1/memories/proposals/{proposal_id}/approve", response_model=MemoryResponse)
+    async def approve_memory_proposal(
         proposal_id: str, data: MemoryApproveRequest, _: None = Depends(require_api_token)
-    ) -> JSONResponse:
+    ) -> MemoryResponse:
         try:
             memory_id = await memory_store.approve(proposal_id, title=data.title)
-            return JSONResponse({"id": memory_id}, status_code=201)
+            async with uow.begin() as unit:
+                assert unit.repositories is not None
+                memory = await unit.repositories.memory.get_long_term(memory_id)
+                assert memory is not None
+                return MemoryResponse(**memory)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    @app.post("/v1/memory/proposals/{proposal_id}/deny")
-    async def deny_proposal(
+    @app.post("/v1/memories/proposals/{proposal_id}/deny")
+    async def deny_memory_proposal(
         proposal_id: str, data: MemoryDenialRequest, _: None = Depends(require_api_token)
     ) -> JSONResponse:
-        denied = await memory_store.deny(proposal_id, reason=data.reason)
-        if not denied:
+        success = await memory_store.deny(proposal_id, reason=data.reason)
+        if not success:
             raise HTTPException(status_code=404, detail="Proposal not found.")
         return JSONResponse({"denied": True})
 
-    @app.get("/v1/memory/long-term", response_model=list[MemoryResponse])
-    async def list_long_term_memory(
+    @app.get("/v1/memories", response_model=list[MemoryResponse])
+    async def list_memories(
         project_id: str | None = None,
+        status: str | None = "active",
+        memory_type: str | None = None,
+        q: str | None = None,
         limit: int = 50,
-        _: None = Depends(require_api_token),
+        offset: int = 0,
+        _: None = Depends(require_api_token)
     ) -> list[MemoryResponse]:
+        return await memory_browser.list_memories(
+            project_id=project_id, 
+            status=status, 
+            memory_type=memory_type, 
+            q=q, 
+            limit=limit, 
+            offset=offset
+        )
+
+    @app.get("/v1/memories/{memory_id}", response_model=MemoryDetailResponse)
+    async def get_memory_detail(
+        memory_id: str, 
+        lineage_depth: int = 3,
+        _: None = Depends(require_api_token)
+    ) -> MemoryDetailResponse:
+        try:
+            return await memory_browser.get_memory_detail(memory_id, lineage_depth=lineage_depth)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.patch("/v1/memories/{memory_id}", response_model=MemoryResponse)
+    async def update_memory(
+        memory_id: str, 
+        data: dict[str, Any],
+        _: None = Depends(require_api_token)
+    ) -> MemoryResponse:
         async with uow.begin() as unit:
             assert unit.repositories is not None
-            sql = "SELECT * FROM long_term_memory"
-            params = []
-            if project_id:
-                sql += " WHERE project_id = ?"
-                params.append(project_id)
-            sql += " ORDER BY created_at DESC LIMIT ?"
-            params.append(limit)
-            
-            cursor = await unit.repositories.memory._connection.execute(sql, tuple(params))
-            rows = await cursor.fetchall()
-            return [
-                MemoryResponse(
-                    **{
-                        **dict(row),
-                        "tags": json.loads(str(row["tags_json"]))
-                    }
-                )
-                for row in rows
-            ]
+            success = await unit.repositories.memory.update_long_term(memory_id, **data)
+            if not success:
+                raise HTTPException(status_code=404, detail="Memory not found.")
+            m = await unit.repositories.memory.get_long_term(memory_id)
+            assert m is not None
+            return MemoryResponse(**m)
 
-    @app.delete("/v1/memory/long-term/{memory_id}")
+    @app.delete("/v1/memories/{memory_id}")
     async def delete_memory(
         memory_id: str, _: None = Depends(require_api_token)
     ) -> JSONResponse:
@@ -325,6 +365,24 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=404, detail="Memory not found.")
         return JSONResponse({"deleted": True})
+
+    @app.post("/v1/memories/{memory_id}/resolve")
+    async def resolve_memory_conflict(
+        memory_id: str, 
+        data: ConflictResolveRequest,
+        _: None = Depends(require_api_token)
+    ) -> JSONResponse:
+        try:
+            await memory_browser.resolve_conflict(
+                memory_id, 
+                action=data.action, 
+                winner_id=data.winner_id,
+                conflicting_ids=data.conflicting_ids,
+                reason=data.reason
+            )
+            return JSONResponse({"resolved": True})
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Approval Endpoints
     @app.get("/v1/approvals", response_model=list[ApprovalResponse])
@@ -420,6 +478,33 @@ def create_app(
             task["events"] = [TaskEventResponse(**e) for e in events]
             
             return TaskDetailResponse(**task)
+
+    @app.get("/v1/tasks/{task_id}/trace", response_model=TaskTraceResponse)
+    async def get_task_trace(task_id: str, include_system: bool = False, _: None = Depends(require_api_token)) -> TaskTraceResponse:
+        try:
+            return await trace_service.get_task_trace(task_id, include_system=include_system)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/v1/tasks/{task_id}/summary", response_model=TaskSummaryResponse)
+    async def get_task_summary(task_id: str, request: Request, _: None = Depends(require_api_token)) -> TaskSummaryResponse:
+        try:
+            # Gather secrets for redaction
+            secrets = []
+            if hasattr(request.app.state, "secret_manager"):
+                all_secrets = await request.app.state.secret_manager.list_secrets()
+                for s in all_secrets:
+                    val = await request.app.state.secret_manager.get_secret(s["name"])
+                    if val:
+                        secrets.append(val)
+            
+            return await trace_service.get_task_summary(task_id, secrets=secrets)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/v1/tasks/{task_id}/plan/approve")
     async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:

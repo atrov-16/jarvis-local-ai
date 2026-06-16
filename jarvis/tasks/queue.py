@@ -186,7 +186,7 @@ class TaskQueue:
             )
             
         memory_store = MemoryStore(self._uow)
-        context_str, memory_ids = await memory_store.get_planner_context(user_request, project_id=project_id)
+        context_str, memory_ids = await memory_store.get_planner_context(user_request, project_id=project_id, task_id=task_id)
         
         if memory_ids:
             await self._event_bus.publish("memory.retrieved", {"memory_ids": memory_ids})
@@ -303,6 +303,7 @@ class TaskQueue:
                     message="Task completed successfully",
                     payload={"status": "completed"}
                 )
+                await self._event_bus.publish("task.completed", {"task_id": task_id, "project_id": current_task.get("project_id")})
 
     async def _execute_step(self, task_id: str, step: dict[str, Any]) -> bool:
         step_id = step["id"]
@@ -386,7 +387,9 @@ class TaskQueue:
                         step_id=step_id,
                         event_type="approval_requested",
                         message=f"Step '{step['title']}' requires approval (Risk: {risk_level.value}).",
-                        payload={"status": "waiting_for_approval", "risk_level": risk_level.value}
+                        payload={"status": "waiting_for_approval", "risk_level": risk_level.value},
+                        severity="warning",
+                        correlation_id=approval_request_id or (approval_req["id"] if approval_req else None)
                     )
                     # Halt task execution
                     if task["status"] == "running":
@@ -405,7 +408,8 @@ class TaskQueue:
                 task_id=task_id,
                 step_id=step_id,
                 event_type="step_started",
-                message=f"Starting step: {step['title']}"
+                message=f"Starting step: {step['title']}",
+                correlation_id=approval_request_id
             )
 
         # 3. Context Preparation
@@ -445,7 +449,8 @@ class TaskQueue:
                     step_id=step_id,
                     event_type="step_completed",
                     message=f"Completed step: {step['title']}",
-                    payload={"execution_time": result.execution_time}
+                    payload={"execution_time": result.execution_time},
+                    correlation_id=approval_request_id
                 )
                 return True
             else:
@@ -459,6 +464,8 @@ class TaskQueue:
                     step_id=step_id,
                     event_type="step_failed",
                     message=f"Step failed: {result.error}",
-                    payload={"error": result.error, "timeout": result.timeout_occurred}
+                    payload={"error": result.error, "timeout": result.timeout_occurred},
+                    severity="error",
+                    correlation_id=approval_request_id
                 )
                 return False
