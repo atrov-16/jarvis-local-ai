@@ -101,15 +101,17 @@ class TraceAggregator:
 
             trace += "--- Audit Log ---\n"
             # Fetch related audit entries
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT * FROM audit_log WHERE task_id = ? ORDER BY created_at ASC",
                 (task_id,)
             )
             audit_rows = await cursor.fetchall()
             for row in audit_rows:
-                trace += f"[{row['created_at']}] {row['actor']}: {row['action_type']} - {row['summary']}\n"
-                if row.get("details_json"):
-                    trace += f"  Details: {row['details_json']}\n"
+                row_dict = dict(row)
+                trace += f"[{row_dict['created_at']}] {row_dict['actor']}: {row_dict['action_type']} - {row_dict['summary']}\n"
+                if row_dict.get("details_json"):
+                    trace += f"  Details: {row_dict['details_json']}\n"
 
             return trace
 

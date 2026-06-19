@@ -182,7 +182,7 @@ def create_app(
     # Workspace Endpoints
     @app.get("/v1/workspaces", response_model=list[WorkspaceResponse])
     async def list_workspaces(_: None = Depends(require_api_token)) -> list[WorkspaceResponse]:
-        return [WorkspaceResponse(**w) for w in await workspaces.list()]
+        return [WorkspaceResponse.model_validate(w) for w in await workspaces.list()]
 
     @app.post("/v1/workspaces", response_model=WorkspaceResponse)
     async def add_workspace(
@@ -193,7 +193,7 @@ def create_app(
             workspace = await workspaces.get(workspace_id)
             if not workspace:
                 raise HTTPException(status_code=500, detail="Failed to retrieve created workspace.")
-            return WorkspaceResponse(**workspace)
+            return WorkspaceResponse.model_validate(workspace)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -209,7 +209,7 @@ def create_app(
     # Project Endpoints
     @app.get("/v1/projects", response_model=list[ProjectResponse])
     async def list_projects(_: None = Depends(require_api_token)) -> list[ProjectResponse]:
-        return [ProjectResponse(**p) for p in await projects.list()]
+        return [ProjectResponse.model_validate(p) for p in await projects.list()]
 
     @app.post("/v1/projects", response_model=ProjectResponse)
     async def create_project(
@@ -219,7 +219,7 @@ def create_app(
         project = await projects.get(project_id)
         if not project:
             raise HTTPException(status_code=500, detail="Failed to retrieve created project.")
-        return ProjectResponse(**project)
+        return ProjectResponse.model_validate(project)
 
     @app.delete("/v1/projects/{project_id}")
     async def delete_project(
@@ -312,7 +312,7 @@ def create_app(
                 assert unit.repositories is not None
                 memory = await unit.repositories.memory.get_long_term(memory_id)
                 assert memory is not None
-                return MemoryResponse(**memory)
+                return MemoryResponse.model_validate(memory)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -368,7 +368,7 @@ def create_app(
                 raise HTTPException(status_code=404, detail="Memory not found.")
             m = await unit.repositories.memory.get_long_term(memory_id)
             assert m is not None
-            return MemoryResponse(**m)
+            return MemoryResponse.model_validate(m)
 
     @app.delete("/v1/memories/{memory_id}")
     async def delete_memory(
@@ -403,7 +403,7 @@ def create_app(
         async with uow.begin() as unit:
             assert unit.repositories is not None
             rows = await unit.repositories.approvals.list_pending()
-            return [ApprovalResponse(**r) for r in rows]
+            return [ApprovalResponse.model_validate(r) for r in rows]
 
     @app.get("/v1/approvals/{approval_id}", response_model=ApprovalResponse)
     async def get_approval(approval_id: str, _: None = Depends(require_api_token)) -> ApprovalResponse:
@@ -412,7 +412,7 @@ def create_app(
             request = await unit.repositories.approvals.get(approval_id)
             if not request:
                 raise HTTPException(status_code=404, detail="Approval request not found.")
-            return ApprovalResponse(**request)
+            return ApprovalResponse.model_validate(request)
 
     @app.post("/v1/approvals/{approval_id}/approve")
     async def approve_request(
@@ -451,7 +451,7 @@ def create_app(
             )
             task = await unit.repositories.tasks.get(task_id)
             assert task is not None
-            return TaskResponse(**task)
+            return TaskResponse.model_validate(task)
 
     @app.get("/v1/tasks", response_model=list[TaskResponse])
     async def list_tasks(
@@ -466,14 +466,14 @@ def create_app(
                 params.append(status)
             sql += " ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
-            
+            assert unit.connection is not None
             cursor = await unit.connection.execute(sql, tuple(params))
             rows = await cursor.fetchall()
             tasks = []
             for row in rows:
                 data = dict(row)
                 data["metadata"] = json.loads(str(data.pop("metadata_json")))
-                tasks.append(TaskResponse(**data))
+                tasks.append(TaskResponse.model_validate(data))
             return tasks
 
     @app.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
@@ -487,10 +487,10 @@ def create_app(
             steps = await unit.repositories.tasks.list_steps(task_id)
             events = await unit.repositories.tasks.list_events(task_id)
             
-            task["steps"] = [TaskStepResponse(**s) for s in steps]
-            task["events"] = [TaskEventResponse(**e) for e in events]
+            task["steps"] = [TaskStepResponse.model_validate(s) for s in steps]
+            task["events"] = [TaskEventResponse.model_validate(e) for e in events]
             
-            return TaskDetailResponse(**task)
+            return TaskDetailResponse.model_validate(task)
 
     @app.get("/v1/tasks/{task_id}/trace", response_model=TaskTraceResponse)
     async def get_task_trace(task_id: str, include_system: bool = False, _: None = Depends(require_api_token)) -> TaskTraceResponse:
@@ -531,6 +531,7 @@ def create_app(
                 raise HTTPException(status_code=400, detail=f"Task is not waiting for plan approval (status: {task['status']})")
                 
             # Find the plan approval request
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'plan' AND status = 'pending' LIMIT 1",
                 (task_id,)
@@ -563,7 +564,7 @@ def create_app(
             if not task:
                 raise HTTPException(status_code=404, detail="Task not found.")
 
-            if task["status"] not in ("paused", "failed"):
+            if task["status"] not in ("paused", "failed", "interrupted"):
                 raise HTTPException(status_code=400, detail=f"Task cannot be resumed from status: {task['status']}")
 
             await unit.repositories.tasks.update(task_id, status="queued")
@@ -593,6 +594,7 @@ def create_app(
         async with uow.begin() as unit:
             assert unit.repositories is not None
             # Find the tool approval request
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT id FROM approval_requests WHERE step_id = ? AND status = 'pending' LIMIT 1",
                 (step_id,)
@@ -615,7 +617,7 @@ def create_app(
             
             updated_step = await unit.repositories.tasks.get_step(step_id)
             assert updated_step is not None
-            return TaskStepResponse(**updated_step)
+            return TaskStepResponse.model_validate(updated_step)
 
     @app.post("/v1/tasks/{task_id}/steps/{step_id}/deny", response_model=TaskStepResponse)
     async def deny_task_step(
@@ -628,6 +630,7 @@ def create_app(
         async with uow.begin() as unit:
             assert unit.repositories is not None
             # Find the approval request
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT id FROM approval_requests WHERE step_id = ? AND status = 'pending' LIMIT 1",
                 (step_id,)
@@ -651,7 +654,7 @@ def create_app(
             
             updated_step = await unit.repositories.tasks.get_step(step_id)
             assert updated_step is not None
-            return TaskStepResponse(**updated_step)
+            return TaskStepResponse.model_validate(updated_step)
 
     @app.post("/v1/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:

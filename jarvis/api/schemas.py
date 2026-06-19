@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field
 
 from jarvis.models.schemas import ProviderStatus
 
+
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    PLANNING = "planning"
+    WAITING_FOR_PLAN_APPROVAL = "waiting_for_plan_approval"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 class HealthResponse(BaseModel):
     status: str
@@ -169,7 +182,7 @@ class TaskResponse(BaseModel):
     project_id: str | None = None
     title: str
     user_request: str
-    status: str
+    status: TaskStatus
     priority: int
     metadata: dict[str, object] = Field(default_factory=dict)
     created_at: str
@@ -197,7 +210,7 @@ class TaskTraceResponse(BaseModel):
 
 class TaskSummaryResponse(BaseModel):
     task_id: str
-    status: str
+    status: TaskStatus
     summary: str | None = None
     outcome: str | None = None
     tokens_used: int | None = None
