@@ -69,8 +69,9 @@ class BuildTool(BaseTool):
             cmd, args = self._prepare_command(system, kwargs)
             
             # 3. Run Command
+            task_id = kwargs.get("task_id")
             start_time = time.perf_counter()
-            res = await self._runner.run(cmd, args, cwd=cwd, timeout=self.timeout_seconds)
+            res = await self._runner.run(cmd, args, cwd=cwd, timeout=self.timeout_seconds, task_id=task_id)
             duration = time.perf_counter() - start_time
             
             # 4. Parse Output for warnings/errors

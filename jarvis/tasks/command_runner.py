@@ -7,9 +7,13 @@ import logging
 import os
 import signal
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from jarvis.core.process_registry import ProcessRegistryService
 
 LOG = logging.getLogger(__name__)
 
@@ -47,6 +51,9 @@ class CommandResult:
 class CommandRunner:
     """Handles the lifecycle of asynchronous subprocesses with safety guards."""
 
+    def __init__(self, process_registry: "ProcessRegistryService | None" = None) -> None:
+        self._process_registry = process_registry
+
     async def run(
         self,
         cmd: str,
@@ -54,6 +61,7 @@ class CommandRunner:
         cwd: Path,
         timeout: int = 60,
         env: dict[str, str] | None = None,
+        task_id: str | None = None,
     ) -> CommandResult:
         """
         Execute a command asynchronously.
@@ -64,6 +72,7 @@ class CommandRunner:
             cwd: Working directory (must be validated before calling).
             timeout: Execution timeout in seconds.
             env: Optional environment variables to add.
+            task_id: Optional ID of the task spawning this process.
             
         Returns:
             CommandResult containing outputs and metadata.
@@ -96,6 +105,21 @@ class CommandRunner:
             creationflags=0x00000200 if os.name == "nt" else 0, 
         )
 
+        process_id = str(uuid.uuid4())
+        command_display = f"{cmd} {' '.join(args)}"
+        
+        if self._process_registry and task_id:
+            from jarvis.core.process_utils import get_process_creation_time
+            creation_time = get_process_creation_time(process.pid)
+            
+            await self._process_registry.register_process(
+                id=process_id,
+                pid=process.pid,
+                task_id=task_id,
+                command_display=command_display,
+                creation_time=creation_time,
+            )
+
         timeout_occurred = False
         stdout_data = b""
         stderr_data = b""
@@ -107,9 +131,15 @@ class CommandRunner:
                 timeout=timeout
             )
             stdout_data = stdout_bytes
-            stderr_bytes = stderr_bytes
+            stderr_data = stderr_bytes  # Fix for BUG: stderr_bytes = stderr_bytes
+            
+            if self._process_registry and task_id:
+                await self._process_registry.update_status(process_id, "completed")
+                
         except asyncio.TimeoutError:
             timeout_occurred = True
+            if self._process_registry and task_id:
+                await self._process_registry.update_status(process_id, "timed_out")
             LOG.warning(f"Command '{cmd}' timed out after {timeout}s. Terminating process group.")
             self._terminate_process(process)
             # Try to grab whatever was in the pipes
@@ -118,9 +148,14 @@ class CommandRunner:
             except Exception:
                 pass
         except Exception as e:
+            if self._process_registry and task_id:
+                await self._process_registry.update_status(process_id, "terminated")
             LOG.exception(f"Unexpected error during command execution: {e}")
             self._terminate_process(process)
             raise
+        finally:
+            if self._process_registry and task_id:
+                await self._process_registry.unregister_process(process_id)
 
         execution_time = time.perf_counter() - start_time
         

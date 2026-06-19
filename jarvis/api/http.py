@@ -50,6 +50,8 @@ from jarvis.config.manager import load_config
 from jarvis.config.models import JarvisConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
+from jarvis.core.orphan_recovery import OrphanRecoveryService
+from jarvis.core.process_registry import ProcessRegistryService
 from jarvis.core.reflection import ReflectionService
 from jarvis.models.router import ModelRouter
 from jarvis.memory.store import MemoryStore
@@ -96,10 +98,12 @@ def create_app(
     trace_service = TraceService(uow, model_router)
     memory_browser = MemoryBrowserService(uow, memory_store)
     approval_center = ApprovalCenterService(uow, approval_broker, memory_store)
+    process_registry = ProcessRegistryService(uow)
+    orphan_recovery = OrphanRecoveryService(process_registry)
 
     # Tool System
     registry = ToolRegistry()
-    command_runner = CommandRunner()
+    command_runner = CommandRunner(process_registry)
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
     registry.register(PatchFileTool())
@@ -127,6 +131,7 @@ def create_app(
         }
         
         # Start background services
+        await orphan_recovery.recover()
         await task_queue.start()
         await reflection_service.start()
         

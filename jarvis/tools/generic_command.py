@@ -97,11 +97,13 @@ class GenericCommandTool(BaseTool):
             timeout = kwargs.get("timeout") or allowed.default_timeout
 
             # 5. Run Command
+            task_id = kwargs.get("task_id")
             res = await self._runner.run(
                 binary_name, 
                 args, 
                 cwd=cwd, 
-                timeout=timeout
+                timeout=timeout,
+                task_id=task_id
             )
             
             # 6. Final Result
