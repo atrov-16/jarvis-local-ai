@@ -55,8 +55,8 @@ class SystemRecoveryService:
                 task_id = row["id"]
                 previous_status = row["status"]
                 
-                # As per requirements, we use "paused" because "interrupted" is not in schema
-                new_status = "paused"
+                # We now use "interrupted" since it's supported by the schema
+                new_status = "interrupted"
                 
                 orphan_terminated = task_id in terminated_task_ids
                 

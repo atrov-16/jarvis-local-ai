@@ -103,6 +103,7 @@ class TaskQueue:
         """Fetch the next task that is ready to be planned or executed."""
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
+            assert unit.connection is not None
             # Prioritize 'queued' tasks
             cursor = await unit.connection.execute(
                 """
@@ -338,6 +339,7 @@ class TaskQueue:
             approval_request_id = None
             if needs_approval:
                 # Check for existing approval request
+                assert unit.connection is not None
                 cursor = await unit.connection.execute(
                     "SELECT id, status FROM approval_requests WHERE step_id = ? ORDER BY created_at DESC LIMIT 1",
                     (step_id,)

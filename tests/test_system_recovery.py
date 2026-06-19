@@ -82,10 +82,10 @@ async def test_run_startup_recovery(
     # Get the mock_unit
     mock_unit = await mock_uow.begin().__aenter__()
     
-    # 2. Both tasks should be updated to 'paused'
+    # 2. Both tasks should be updated to 'interrupted'
     assert mock_unit.repositories.tasks.update.call_count == 2
-    mock_unit.repositories.tasks.update.assert_any_call("task_1", status="paused")
-    mock_unit.repositories.tasks.update.assert_any_call("task_2", status="paused")
+    mock_unit.repositories.tasks.update.assert_any_call("task_1", status="interrupted")
+    mock_unit.repositories.tasks.update.assert_any_call("task_2", status="interrupted")
     
     # 3. Events should be inserted for both tasks
     assert mock_unit.repositories.tasks.insert_event.call_count == 2
@@ -94,7 +94,7 @@ async def test_run_startup_recovery(
     mock_unit.repositories.tasks.insert_event.assert_any_call(
         task_id="task_1",
         event_type="status_change",
-        message="Task recovered after daemon restart and marked as paused.",
+        message="Task recovered after daemon restart and marked as interrupted.",
         payload={
             "recovery_reason": "daemon_restart",
             "previous_status": "running",
@@ -107,7 +107,7 @@ async def test_run_startup_recovery(
     mock_unit.repositories.tasks.insert_event.assert_any_call(
         task_id="task_2",
         event_type="status_change",
-        message="Task recovered after daemon restart and marked as paused.",
+        message="Task recovered after daemon restart and marked as interrupted.",
         payload={
             "recovery_reason": "daemon_restart",
             "previous_status": "planning",

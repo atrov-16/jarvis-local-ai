@@ -127,12 +127,15 @@ class ApprovalCenterService:
             action_stats = await unit.repositories.approvals.get_stats()
             
             # Simple aggregation for memory proposals
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT COUNT(*) as count FROM memory_proposals WHERE status = 'pending'"
             )
-            memory_pending = (await cursor.fetchone())["count"]
+            row = await cursor.fetchone()
+            memory_pending = int(row["count"]) if row else 0
             
             # Risk counts
+            assert unit.connection is not None
             cursor = await unit.connection.execute(
                 "SELECT risk_level, COUNT(*) as count FROM approval_requests WHERE status = 'pending' GROUP BY risk_level"
             )
