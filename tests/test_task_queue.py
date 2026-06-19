@@ -98,21 +98,7 @@ async def test_task_lifecycle_planning_to_completed(task_queue, uow, mock_planne
         
     await task_queue.stop()
 
-async def test_recovery_scanner(task_queue, uow):
-    async with uow.begin() as unit:
-        # Create a task stuck in 'running'
-        t1 = await unit.repositories.tasks.insert(title="Stuck", user_request="...", status="running")
-        # Create a task stuck in 'planning'
-        t2 = await unit.repositories.tasks.insert(title="Planning", user_request="...", status="planning")
-        
-    await task_queue.run_recovery()
-    
-    async with uow.begin() as unit:
-        task1 = await unit.repositories.tasks.get(t1)
-        assert task1["status"] == "paused"
-        
-        task2 = await unit.repositories.tasks.get(t2)
-        assert task2["status"] == "queued"
+
 
 async def test_claimed_at_updated(task_queue, uow, mock_planner):
     mock_planner.create_plan = AsyncMock(return_value=PlannedTask(

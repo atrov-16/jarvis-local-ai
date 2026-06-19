@@ -43,8 +43,7 @@ class TaskQueue:
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
-        """Start the background worker and run recovery."""
-        await self.run_recovery()
+        """Start the background worker."""
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._worker_loop())
             LOG.info("TaskQueue worker started.")
@@ -87,35 +86,7 @@ class TaskQueue:
             await subscription.close()
 
 
-    async def run_recovery(self) -> None:
-        """Recover tasks from interrupted states (e.g. after daemon crash)."""
-        async with self._uow.begin() as unit:
-            assert unit.repositories is not None
-            # Any 'running' task should be paused on restart
-            cursor = await unit.connection.execute(
-                "SELECT id FROM tasks WHERE status = 'running'"
-            )
-            rows = await cursor.fetchall()
-            for row in rows:
-                task_id = row["id"]
-                await unit.repositories.tasks.update(task_id, status="paused")
-                await unit.repositories.tasks.insert_event(
-                    task_id=task_id,
-                    event_type="status_change",
-                    message="Task paused due to daemon restart.",
-                    payload={"old_status": "running", "new_status": "paused"}
-                )
-                LOG.info(f"Recovered task {task_id}: marked as paused.")
 
-            # Any 'planning' task should be reverted to 'queued'
-            cursor = await unit.connection.execute(
-                "SELECT id FROM tasks WHERE status = 'planning'"
-            )
-            rows = await cursor.fetchall()
-            for row in rows:
-                task_id = row["id"]
-                await unit.repositories.tasks.update(task_id, status="queued")
-                LOG.info(f"Recovered task {task_id}: reverted to queued.")
 
     async def _worker_loop(self) -> None:
         """The main loop for processing tasks sequentially."""
