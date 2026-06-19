@@ -73,25 +73,26 @@ class GitTool(BaseTool):
                     return ToolResult(success=False, error="Target path is not part of a Git repository.")
 
             # 2. Dispatch Operation
+            task_id = kwargs.get("task_id")
             if operation == GitOperation.STATUS:
-                return await self._do_status(cwd)
+                return await self._do_status(cwd, task_id)
             elif operation == GitOperation.DIFF:
-                return await self._do_diff(cwd, kwargs.get("path"))
+                return await self._do_diff(cwd, kwargs.get("path"), task_id)
             elif operation == GitOperation.LOG:
-                return await self._do_log(cwd, kwargs.get("limit", 5))
+                return await self._do_log(cwd, kwargs.get("limit", 5), task_id)
             else:
                 return ToolResult(success=False, error=f"Operation '{operation}' is reserved or not supported.")
 
         except Exception as e:
             return ToolResult(success=False, error=str(e))
 
-    async def _do_status(self, cwd: Path) -> ToolResult:
+    async def _do_status(self, cwd: Path, task_id: str | None = None) -> ToolResult:
         # Branch detection
-        branch_res = await self._runner.run("git", ["branch", "--show-current"], cwd=cwd)
+        branch_res = await self._runner.run("git", ["branch", "--show-current"], cwd=cwd, task_id=task_id)
         branch = branch_res.stdout.strip() or "DETACHED"
 
         # Porcelain status for counts
-        status_res = await self._runner.run("git", ["status", "--porcelain=v1"], cwd=cwd)
+        status_res = await self._runner.run("git", ["status", "--porcelain=v1"], cwd=cwd, task_id=task_id)
         lines = status_res.stdout.splitlines()
         
         modified = 0
@@ -118,12 +119,12 @@ class GitTool(BaseTool):
         
         return ToolResult(success=True, data=summary)
 
-    async def _do_diff(self, cwd: Path, file_path: str | None) -> ToolResult:
+    async def _do_diff(self, cwd: Path, file_path: str | None, task_id: str | None = None) -> ToolResult:
         args = ["diff", "--no-color", "--no-ext-diff"]
         if file_path:
             args.append(file_path)
             
-        res = await self._runner.run("git", args, cwd=cwd)
+        res = await self._runner.run("git", args, cwd=cwd, task_id=task_id)
         
         if not res.stdout and not res.stderr and res.exit_code == 0:
             return ToolResult(success=True, data={"diff": "", "message": "No changes found."})
@@ -136,12 +137,13 @@ class GitTool(BaseTool):
 
         return ToolResult(success=True, data={"diff": output})
 
-    async def _do_log(self, cwd: Path, limit: int) -> ToolResult:
+    async def _do_log(self, cwd: Path, limit: int, task_id: str | None = None) -> ToolResult:
         limit = min(max(1, limit), 20)
         res = await self._runner.run(
             "git", 
             ["log", f"-n{limit}", "--oneline", "--no-color"], 
-            cwd=cwd
+            cwd=cwd,
+            task_id=task_id
         )
         
         if res.exit_code != 0:

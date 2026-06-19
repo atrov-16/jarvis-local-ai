@@ -65,7 +65,8 @@ class TestTool(BaseTool):
             cmd, args = self._prepare_command(framework, kwargs)
             
             # 2. Run Command
-            res = await self._runner.run(cmd, args, cwd=cwd, timeout=self.timeout_seconds)
+            task_id = kwargs.get("task_id")
+            res = await self._runner.run(cmd, args, cwd=cwd, timeout=self.timeout_seconds, task_id=task_id)
             
             # 3. Parse Output
             parsed_data = self._parse_output(framework, res.stdout, res.stderr)

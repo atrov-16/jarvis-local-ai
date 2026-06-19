@@ -919,6 +919,39 @@ class ApprovalRepository:
         return cursor.rowcount > 0
 
 
+class ProcessRegistryRepository:
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def register(
+        self, id: str, pid: int, task_id: str, command_display: str, status: str, creation_time: float | None = None
+    ) -> None:
+        await self._connection.execute(
+            """
+            INSERT INTO process_registry (id, pid, task_id, command_display, status, started_at, creation_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (id, pid, task_id, command_display, status, _now(), creation_time),
+        )
+
+    async def unregister(self, id: str) -> bool:
+        cursor = await self._connection.execute(
+            "DELETE FROM process_registry WHERE id = ?", (id,)
+        )
+        return cursor.rowcount > 0
+
+    async def update_status(self, id: str, status: str) -> bool:
+        cursor = await self._connection.execute(
+            "UPDATE process_registry SET status = ? WHERE id = ?", (status, id)
+        )
+        return cursor.rowcount > 0
+
+    async def list_all(self) -> list[dict]:
+        cursor = await self._connection.execute("SELECT * FROM process_registry")
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 class StorageRepositories:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self.app_state = AppStateRepository(connection)
@@ -928,6 +961,7 @@ class StorageRepositories:
         self.memory = MemoryRepository(connection)
         self.tasks = TaskRepository(connection)
         self.approvals = ApprovalRepository(connection)
+        self.processes = ProcessRegistryRepository(connection)
 
 
 def _now() -> str:
