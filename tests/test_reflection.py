@@ -7,10 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jarvis.core.event_bus import EventBus
-from jarvis.core.reflection import ReflectionService, TraceAggregator
+from jarvis.core.reflection import ReflectionService
 from jarvis.memory.store import MemoryStore
-from jarvis.models.schemas import ModelResponse, Message
+from jarvis.models.schemas import Message, ModelResponse
 from jarvis.storage.unit_of_work import UnitOfWork
 
 

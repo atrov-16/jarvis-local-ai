@@ -1,9 +1,11 @@
 """Tests for MemoryRepository and Phase 4 migrations."""
 
 import pytest
+
 from jarvis.storage.connection import sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
+
 
 @pytest.fixture
 async def uow(tmp_path):

@@ -1,7 +1,7 @@
 import ctypes
 import ctypes.wintypes as wintypes
 import os
-import sys
+
 
 def get_process_creation_time_windows(pid: int) -> float | None:
     kernel32 = ctypes.windll.kernel32

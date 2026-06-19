@@ -98,7 +98,7 @@ class ToolExecutor:
                     execution_time=execution_time,
                     timeout_occurred=False
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 execution_time = time.perf_counter() - start_time
                 LOG.warning(f"Tool '{tool_name}' timed out after {tool.timeout_seconds}s")
                 return ToolResult(

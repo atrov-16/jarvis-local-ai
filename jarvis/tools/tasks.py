@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,7 @@ class GetTaskStatusTool(BaseTool):
             category=ToolCategory.READ_ONLY,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return GetTaskStatusInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

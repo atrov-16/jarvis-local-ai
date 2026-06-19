@@ -8,7 +8,7 @@ import sys
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -47,7 +47,7 @@ class BuildTool(BaseTool):
         )
         self._runner = runner
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return BuildToolInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
-from typing import Any
+from datetime import datetime
 
-from jarvis.api.schemas import TraceEntry, TaskTraceResponse, TaskSummaryResponse
-from jarvis.models.router import ModelRouter
-from jarvis.models.schemas import ModelRequest, Message
-from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.api.schemas import TaskSummaryResponse, TaskTraceResponse, TraceEntry
 from jarvis.logging.redaction import redact_text
+from jarvis.models.router import ModelRouter
+from jarvis.models.schemas import Message, ModelRequest
+from jarvis.storage.unit_of_work import UnitOfWork
 
 LOG = logging.getLogger(__name__)
 

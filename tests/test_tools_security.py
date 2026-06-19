@@ -1,10 +1,11 @@
 """Security and boundary tests for Jarvis tools."""
 
-import pytest
 import os
-from pathlib import Path
-from jarvis.tools.filesystem import ReadFileTool, WriteFileTool, ListDirectoryTool
-from jarvis.tools.base import ToolCategory
+
+import pytest
+
+from jarvis.tools.filesystem import ListDirectoryTool, ReadFileTool, WriteFileTool
+
 
 @pytest.fixture
 def workspace_root(tmp_path):

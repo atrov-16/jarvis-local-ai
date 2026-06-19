@@ -56,6 +56,7 @@ async def test_workspace_path_case_insensitivity(tmp_path: Path) -> None:
         # Attempt to insert a workspace with the same path but different case
         # This should fail due to UNIQUE COLLATE NOCASE
         import sqlite3
+
         import pytest
         with pytest.raises(sqlite3.IntegrityError):
             await connection.execute(
@@ -107,6 +108,13 @@ async def test_cascading_deletes(tmp_path: Path) -> None:
 async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
     database_path = tmp_path / "memory.sqlite"
 
+    from jarvis.storage.connection import open_sqlite_connection
+    conn = await open_sqlite_connection(database_path)
+    try:
+        await run_migrations(conn)
+    finally:
+        await conn.close()
+
     async with UnitOfWork(database_path).begin() as unit:
         assert unit.repositories is not None
         await unit.repositories.app_state.set("current_project_id", {"id": "project-1"})
@@ -127,6 +135,13 @@ async def test_app_state_and_audit_repositories(tmp_path: Path) -> None:
 
 async def test_workspace_and_project_repositories(tmp_path: Path) -> None:
     database_path = tmp_path / "memory.sqlite"
+
+    from jarvis.storage.connection import open_sqlite_connection
+    conn = await open_sqlite_connection(database_path)
+    try:
+        await run_migrations(conn)
+    finally:
+        await conn.close()
 
     async with UnitOfWork(database_path).begin() as unit:
         assert unit.repositories is not None

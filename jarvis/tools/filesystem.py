@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, List, Type
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +22,7 @@ class PatchHunkInput(BaseModel):
 
 class PatchFileInput(BaseModel):
     path: str = Field(..., description="Path to the file to patch.")
-    hunks: List[PatchHunkInput] = Field(..., description="List of search/replace blocks to apply.")
+    hunks: list[PatchHunkInput] = Field(..., description="List of search/replace blocks to apply.")
 
 
 class PatchFileTool(BaseTool):
@@ -37,7 +36,7 @@ class PatchFileTool(BaseTool):
         )
         self._engine = PatchEngine()
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return PatchFileInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -108,7 +107,7 @@ class PatchFileTool(BaseTool):
             shutil.move(str(backup_path), str(target_path))
 
 
-def _get_validated_path(target_path_str: str, workspaces: List[dict]) -> Path:
+def _get_validated_path(target_path_str: str, workspaces: list[dict]) -> Path:
     """Resolve and validate that a path is within at least one workspace."""
     target_path = Path(target_path_str).expanduser()
     
@@ -146,7 +145,7 @@ class ReadFileTool(BaseTool):
             category=ToolCategory.READ_ONLY,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return ReadFileInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -177,7 +176,7 @@ class ListDirectoryTool(BaseTool):
             category=ToolCategory.READ_ONLY,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return ListDirectoryInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -215,7 +214,7 @@ class WriteFileTool(BaseTool):
             category=ToolCategory.MUTATING,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return WriteFileInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -246,7 +245,7 @@ class DeleteFileTool(BaseTool):
             category=ToolCategory.DESTRUCTIVE,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return DeleteFileInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -309,7 +308,7 @@ class RestoreFileTool(BaseTool):
             category=ToolCategory.MUTATING,
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return RestoreFileInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

@@ -11,15 +11,13 @@ from typing import TYPE_CHECKING, Any
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.approvals.models import ApprovalActionType, ProposedAction, RiskLevel
 from jarvis.core.event_bus import EventBus
+from jarvis.memory.store import MemoryStore
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.planner import Planner
 from jarvis.tools.executor import ToolExecutor
-from jarvis.tools.base import ToolCategory
-from jarvis.memory.store import MemoryStore
 
 if TYPE_CHECKING:
     from jarvis.tasks.planner import PlannedTask
-    from jarvis.core.events import Event
 
 LOG = logging.getLogger(__name__)
 
@@ -56,7 +54,7 @@ class TaskQueue:
         if self._worker_task:
             try:
                 await asyncio.wait_for(self._worker_task, timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._worker_task.cancel()
             self._worker_task = None
             

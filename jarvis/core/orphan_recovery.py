@@ -85,7 +85,7 @@ class OrphanRecoveryService:
         try:
             cmdline_path = f"/proc/{pid}/cmdline"
             if os.path.exists(cmdline_path):
-                with open(cmdline_path, "r") as f:
+                with open(cmdline_path) as f:
                     actual_command = f.read().replace('\0', ' ').strip().lower()
                     expected_parts = expected_command.lower().split()
                     if expected_parts and expected_parts[0] in actual_command:

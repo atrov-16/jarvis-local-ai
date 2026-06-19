@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
 from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
 
 
 class GitOperation(str, Enum):
@@ -43,7 +42,7 @@ class GitTool(BaseTool):
         )
         self._runner = runner
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return GitToolInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

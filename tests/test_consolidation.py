@@ -9,7 +9,7 @@ import pytest
 
 from jarvis.core.consolidation import ConsolidationService
 from jarvis.memory.store import MemoryStore
-from jarvis.models.schemas import ModelResponse, Message
+from jarvis.models.schemas import Message, ModelResponse
 from jarvis.storage.unit_of_work import UnitOfWork
 
 

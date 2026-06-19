@@ -51,7 +51,7 @@ class CommandResult:
 class CommandRunner:
     """Handles the lifecycle of asynchronous subprocesses with safety guards."""
 
-    def __init__(self, process_registry: "ProcessRegistryService | None" = None) -> None:
+    def __init__(self, process_registry: ProcessRegistryService | None = None) -> None:
         self._process_registry = process_registry
 
     async def run(
@@ -136,7 +136,7 @@ class CommandRunner:
             if self._process_registry and task_id:
                 await self._process_registry.update_status(process_id, "completed")
                 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timeout_occurred = True
             if self._process_registry and task_id:
                 await self._process_registry.update_status(process_id, "timed_out")

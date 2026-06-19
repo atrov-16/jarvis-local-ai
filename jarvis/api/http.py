@@ -15,6 +15,8 @@ from jarvis import __version__
 from jarvis.api.schemas import (
     ApprovalDecisionRequest,
     ApprovalResponse,
+    ApprovalStats,
+    BulkApprovalRequest,
     ConflictResolveRequest,
     CurrentProjectUpdate,
     HealthResponse,
@@ -23,28 +25,25 @@ from jarvis.api.schemas import (
     MemoryDetailResponse,
     MemoryProposalResponse,
     MemoryResponse,
-    MemorySearchResultResponse,
     ProjectCreate,
     ProjectResponse,
     StatusResponse,
     TaskCreate,
     TaskDecisionRequest,
-    TaskResponse,
     TaskDetailResponse,
-    TaskStepResponse,
     TaskEventResponse,
-    TaskTraceResponse,
+    TaskResponse,
+    TaskStepResponse,
     TaskSummaryResponse,
+    TaskTraceResponse,
     UnifiedApprovalItem,
-    BulkApprovalRequest,
-    ApprovalStats,
     WorkspaceCreate,
     WorkspaceResponse,
 )
-from jarvis.api.websocket import authenticate_websocket
-from jarvis.api.services.trace import TraceService
-from jarvis.api.services.memory_browser import MemoryBrowserService
 from jarvis.api.services.approval_center import ApprovalCenterService
+from jarvis.api.services.memory_browser import MemoryBrowserService
+from jarvis.api.services.trace import TraceService
+from jarvis.api.websocket import authenticate_websocket
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.config.manager import load_config
 from jarvis.config.models import JarvisConfig
@@ -54,24 +53,31 @@ from jarvis.core.orphan_recovery import OrphanRecoveryService
 from jarvis.core.process_registry import ProcessRegistryService
 from jarvis.core.recovery import SystemRecoveryService
 from jarvis.core.reflection import ReflectionService
-from jarvis.models.router import ModelRouter
 from jarvis.memory.store import MemoryStore
+from jarvis.models.router import ModelRouter
 from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
-from jarvis.tasks.planner import Planner
 from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tasks.planner import Planner
 from jarvis.tasks.queue import TaskQueue
-from jarvis.tools.executor import ToolExecutor
-from jarvis.tools.registry import ToolRegistry
-from jarvis.tools.filesystem import DeleteFileTool, ListDirectoryTool, PatchFileTool, ReadFileTool, RestoreFileTool, WriteFileTool
-from jarvis.tools.git import GitTool
-from jarvis.tools.test_runner import TestTool
 from jarvis.tools.build_runner import BuildTool
+from jarvis.tools.executor import ToolExecutor
+from jarvis.tools.filesystem import (
+    DeleteFileTool,
+    ListDirectoryTool,
+    PatchFileTool,
+    ReadFileTool,
+    RestoreFileTool,
+    WriteFileTool,
+)
 from jarvis.tools.generic_command import GenericCommandTool
-from jarvis.tools.memory import SearchMemoryTool, CreateMemoryProposalTool
+from jarvis.tools.git import GitTool
+from jarvis.tools.memory import CreateMemoryProposalTool, SearchMemoryTool
+from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.tasks import GetTaskStatusTool
+from jarvis.tools.test_runner import TestTool
 from jarvis.workspaces.registry import WorkspaceRegistry
 
 

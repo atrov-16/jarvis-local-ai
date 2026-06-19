@@ -113,6 +113,7 @@ def test_status_includes_providers(client: TestClient) -> None:
     
     # We need to patch the check_availability on the instance stored in app.state
     from unittest.mock import AsyncMock, patch
+
     from jarvis.models.schemas import ProviderStatus
 
     mock_statuses = [

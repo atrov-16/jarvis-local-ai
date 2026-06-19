@@ -1,8 +1,9 @@
+
 import pytest
-import os
-from pathlib import Path
-from jarvis.tools.generic_command import GenericCommandTool, ALLOWED_BINARIES
+
 from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tools.generic_command import GenericCommandTool
+
 
 @pytest.fixture
 def runner():
@@ -23,6 +24,7 @@ async def test_command_allowlist_enforcement(command_tool):
     # We'll use 'ls' which should exist on most systems (even Windows via git bash or similar, 
     # but we'll mock to be safe)
     from unittest.mock import AsyncMock
+
     from jarvis.tasks.command_runner import CommandResult
     
     command_tool._runner.run = AsyncMock(return_value=CommandResult(
@@ -54,6 +56,7 @@ async def test_workspace_confinement_args(command_tool, tmp_path):
 async def test_network_awareness_metadata(command_tool):
     # Mock runner for npm (network-aware)
     from unittest.mock import AsyncMock
+
     from jarvis.tasks.command_runner import CommandResult
     
     command_tool._runner.run = AsyncMock(return_value=CommandResult(

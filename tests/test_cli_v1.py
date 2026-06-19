@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+
 from typer.testing import CliRunner
+
 from jarvis.app.terminal import app
+
 
 def test_workspace_commands(monkeypatch) -> None:
     runner = CliRunner()
