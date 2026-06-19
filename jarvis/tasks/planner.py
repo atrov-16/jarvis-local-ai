@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 from jarvis.models.router import ModelRouter
-from jarvis.models.schemas import ModelRequest, Message
-from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.models.schemas import Message, ModelRequest
 
 
 class PlannedStep(BaseModel):

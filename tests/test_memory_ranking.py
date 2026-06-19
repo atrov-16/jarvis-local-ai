@@ -1,9 +1,12 @@
 """Tests for Phase 7 Step 2 memory ranking and retrieval."""
 
-import pytest
 import datetime
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from jarvis.memory.store import MemoryStore
+
 
 @pytest.fixture
 def uow():

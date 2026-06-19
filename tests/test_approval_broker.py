@@ -1,15 +1,18 @@
-import pytest
 import asyncio
+
+import pytest
+from pydantic import BaseModel
+
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.approvals.models import ApprovalActionType, ProposedAction, RiskLevel
 from jarvis.core.event_bus import EventBus
-from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.storage.connection import sqlite_connection
 from jarvis.storage.migrations import run_migrations
-from jarvis.tools.base import ToolCategory, ToolResult, BaseTool
+from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
 from jarvis.tools.executor import ToolExecutor
 from jarvis.tools.registry import ToolRegistry
-from pydantic import BaseModel
+
 
 @pytest.fixture
 async def uow(tmp_path):

@@ -2,9 +2,11 @@
 
 import pytest
 from fastapi.testclient import TestClient
+
 from jarvis.api.http import create_app
 from jarvis.config.models import JarvisConfig, MemoryConfig
 from jarvis.config.secrets import SecretManager
+
 
 @pytest.fixture
 def client(tmp_path):

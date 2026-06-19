@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jarvis.api.http import create_app
-from jarvis.models.schemas import ModelResponse, Message
+from jarvis.models.schemas import Message, ModelResponse
 
 
 @pytest.fixture

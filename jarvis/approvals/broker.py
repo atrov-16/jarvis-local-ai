@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any
 
 from jarvis.approvals.models import ApprovalActionType, ProposedAction, RiskLevel
 from jarvis.core.event_bus import EventBus

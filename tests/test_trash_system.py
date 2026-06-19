@@ -1,9 +1,9 @@
+
 import pytest
-import os
-import shutil
-from pathlib import Path
-from jarvis.tools.trash_manager import TrashManager, TrashEntry
-from jarvis.tools.filesystem import DeleteFileTool, RestoreFileTool, ToolResult
+
+from jarvis.tools.filesystem import DeleteFileTool, RestoreFileTool
+from jarvis.tools.trash_manager import TrashManager
+
 
 @pytest.fixture
 def workspace(tmp_path):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -45,7 +45,7 @@ class BaseTool(ABC):
         self.timeout_seconds = timeout_seconds
 
     @abstractmethod
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         """Return the Pydantic model for this tool's input."""
         pass
 

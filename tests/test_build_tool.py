@@ -1,8 +1,9 @@
+
 import pytest
-import os
-from pathlib import Path
-from jarvis.tools.build_runner import BuildTool, BuildSystem
+
 from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tools.build_runner import BuildSystem, BuildTool
+
 
 @pytest.fixture
 def runner():
@@ -41,6 +42,7 @@ async def test_detect_typescript(build_tool, tmp_path):
     # We need to run execute to check is_typescript in result data
     # but we'll mock the runner to avoid actually running npm
     from unittest.mock import AsyncMock
+
     from jarvis.tasks.command_runner import CommandResult
     
     build_tool._runner.run = AsyncMock(return_value=CommandResult(

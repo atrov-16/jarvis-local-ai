@@ -8,7 +8,6 @@ from types import TracebackType
 import aiosqlite
 
 from jarvis.storage.connection import open_sqlite_connection
-from jarvis.storage.migrations import run_migrations
 from jarvis.storage.repositories import StorageRepositories
 
 
@@ -41,7 +40,6 @@ class UnitOfWorkScope:
 
     async def __aenter__(self) -> UnitOfWorkScope:
         self.connection = await open_sqlite_connection(self._database_path)
-        await run_migrations(self.connection)
         self.repositories = StorageRepositories(self.connection)
         return self
 

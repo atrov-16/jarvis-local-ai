@@ -2,6 +2,7 @@
 
 import os
 
+
 def get_process_creation_time(pid: int) -> float | None:
     """Retrieve the exact OS creation time of a process by PID."""
     if os.name == "nt":

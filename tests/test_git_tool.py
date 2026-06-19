@@ -1,8 +1,10 @@
-import pytest
 import subprocess
-from pathlib import Path
-from jarvis.tools.git import GitTool, GitOperation
+
+import pytest
+
 from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tools.git import GitOperation, GitTool
+
 
 @pytest.fixture
 def runner():

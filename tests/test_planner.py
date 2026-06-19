@@ -1,10 +1,13 @@
 """Tests for the Planner service."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from jarvis.tasks.planner import Planner, PlannedTask, PlannedStep
+
+import pytest
+
 from jarvis.models.router import ModelRouter
-from jarvis.models.schemas import ModelResponse, Message
+from jarvis.models.schemas import Message, ModelResponse
+from jarvis.tasks.planner import Planner
+
 
 @pytest.fixture
 def mock_router():

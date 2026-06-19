@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from jarvis.models.router import ModelRouter
-from jarvis.models.schemas import ModelRequest, Message
 from jarvis.memory.store import MemoryStore
+from jarvis.models.router import ModelRouter
+from jarvis.models.schemas import Message, ModelRequest
 from jarvis.storage.unit_of_work import UnitOfWork
 
 if TYPE_CHECKING:
-    from jarvis.memory.store import MemorySearchResult
+    pass
 
 LOG = logging.getLogger(__name__)
 

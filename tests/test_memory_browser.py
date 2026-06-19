@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from jarvis.api.services.memory_browser import MemoryBrowserService
-from jarvis.memory.store import MemoryStore, MemorySearchResult
-from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.memory.store import MemoryStore
 
 
 @pytest.fixture
@@ -54,7 +52,7 @@ async def test_list_memories_simple(mock_uow, mock_memory_store):
     assert memories[0].id == "m1"
 
 
-from unittest.mock import AsyncMock, MagicMock, ANY
+from unittest.mock import ANY
 
 ...
 

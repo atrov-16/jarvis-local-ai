@@ -1,8 +1,10 @@
-import pytest
-import os
 from pathlib import Path
+
+import pytest
+
+from jarvis.tools.filesystem import PatchFileTool, PatchHunkInput
 from jarvis.tools.patch_engine import PatchEngine, PatchHunk
-from jarvis.tools.filesystem import PatchFileTool, PatchHunkInput, ToolResult
+
 
 @pytest.fixture
 def patch_engine():

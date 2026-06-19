@@ -9,7 +9,6 @@ from jarvis.config.secrets import SecretManager
 from jarvis.models.openrouter import OpenRouterProvider
 from jarvis.models.providers import (
     AuthenticationError,
-    ModelProviderError,
     RetryableProviderError,
 )
 from jarvis.models.schemas import Message, ModelRequest

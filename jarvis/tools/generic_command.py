@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -59,7 +58,7 @@ class GenericCommandTool(BaseTool):
         )
         self._runner = runner
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return GenericCommandInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

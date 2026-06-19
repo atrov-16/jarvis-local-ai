@@ -1,12 +1,11 @@
 """Approval and notification tests for Phase 6."""
 
-import pytest
-import json
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from jarvis.tasks.planner import PlannedTask, PlannedStep
-from jarvis.tools.base import ToolCategory, ToolResult
 
 from jarvis.api.http import create_app
 from jarvis.config.models import JarvisConfig, MemoryConfig
@@ -15,7 +14,9 @@ from jarvis.core.event_bus import EventBus
 from jarvis.storage.connection import sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
-from fastapi.testclient import TestClient
+from jarvis.tasks.planner import PlannedStep, PlannedTask
+from jarvis.tools.base import ToolCategory, ToolResult
+
 
 @pytest.fixture
 def event_bus():

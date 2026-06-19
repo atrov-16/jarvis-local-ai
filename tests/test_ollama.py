@@ -7,7 +7,6 @@ import pytest
 
 from jarvis.models.ollama import OllamaProvider
 from jarvis.models.providers import (
-    ModelProviderError,
     RetryableProviderError,
 )
 from jarvis.models.schemas import Message, ModelRequest

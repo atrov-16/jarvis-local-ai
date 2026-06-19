@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,7 +11,7 @@ from jarvis.models.providers import (
     RetryableProviderError,
 )
 from jarvis.models.router import ModelRouter
-from jarvis.models.schemas import Message, ModelRequest, ProviderStatus
+from jarvis.models.schemas import Message, ModelRequest
 from jarvis.models.testing import FakeProvider
 
 

@@ -1,12 +1,13 @@
 """Tests for tool execution foundations."""
 
+from typing import Any
+
 import pytest
 from pydantic import BaseModel, Field
-from typing import Any, Type
 
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
-from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.executor import ToolExecutor
+from jarvis.tools.registry import ToolRegistry
 
 
 class MockInput(BaseModel):
@@ -22,7 +23,7 @@ class MockSuccessTool(BaseTool):
             category=ToolCategory.READ_ONLY
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return MockInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -37,7 +38,7 @@ class MockFailTool(BaseTool):
             category=ToolCategory.MUTATING
         )
 
-    def get_input_schema(self) -> Type[BaseModel]:
+    def get_input_schema(self) -> type[BaseModel]:
         return MockInput
 
     async def execute(self, **kwargs: Any) -> ToolResult:

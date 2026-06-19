@@ -1,14 +1,17 @@
 """Tests for TaskQueue service."""
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from jarvis.tasks.queue import TaskQueue
-from jarvis.tasks.planner import Planner, PlannedTask, PlannedStep
+
+import pytest
+
 from jarvis.core.event_bus import EventBus
 from jarvis.storage.connection import sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.tasks.planner import PlannedStep, PlannedTask, Planner
+from jarvis.tasks.queue import TaskQueue
+
 
 @pytest.fixture
 async def uow(tmp_path):
@@ -23,6 +26,7 @@ def event_bus():
 
 from jarvis.tools.executor import ToolExecutor
 from jarvis.tools.registry import ToolRegistry
+
 
 @pytest.fixture
 def mock_planner():

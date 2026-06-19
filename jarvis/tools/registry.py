@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
 
 from jarvis.tools.base import BaseTool
 
@@ -14,7 +13,7 @@ class ToolRegistry:
     """Central registry for all available tools."""
 
     def __init__(self) -> None:
-        self._tools: Dict[str, BaseTool] = {}
+        self._tools: dict[str, BaseTool] = {}
 
     def register(self, tool: BaseTool) -> None:
         """Register a new tool."""
@@ -29,11 +28,11 @@ class ToolRegistry:
             raise KeyError(f"Tool not found: {name}")
         return self._tools[name]
 
-    def list_tools(self) -> List[BaseTool]:
+    def list_tools(self) -> list[BaseTool]:
         """Return a list of all registered tools."""
         return list(self._tools.values())
 
-    def get_tool_schemas(self) -> List[dict]:
+    def get_tool_schemas(self) -> list[dict]:
         """Export tool configurations for LLM planning."""
         schemas = []
         for tool in self._tools.values():

@@ -3,14 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.workspaces.registry import WorkspaceRegistry
-from jarvis.projects.registry import ProjectRegistry
 
+
+from jarvis.storage.migrations import run_migrations
 
 @pytest.fixture
-def uow(tmp_path: Path) -> UnitOfWork:
-    return UnitOfWork(tmp_path / "memory.sqlite")
+async def uow(tmp_path: Path) -> UnitOfWork:
+    db_path = tmp_path / "memory.sqlite"
+    # Ensure migrations are run since UnitOfWork no longer does it implicitly
+    from jarvis.storage.connection import open_sqlite_connection
+    conn = await open_sqlite_connection(db_path)
+    try:
+        await run_migrations(conn)
+    finally:
+        await conn.close()
+    return UnitOfWork(db_path)
 
 
 async def test_workspace_registry(uow: UnitOfWork) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 from jarvis.api.services.approval_center import ApprovalCenterService
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.memory.store import MemoryStore
-from jarvis.storage.unit_of_work import UnitOfWork
 
 
 @pytest.fixture
@@ -79,7 +77,7 @@ async def test_list_pending_unified(mock_uow, mock_broker, mock_store):
 async def test_bulk_approve_mixed(mock_uow, mock_broker, mock_store):
     service = ApprovalCenterService(mock_uow, mock_broker, mock_store)
     
-    from jarvis.api.schemas import BulkApprovalRequest, BulkApprovalItem
+    from jarvis.api.schemas import BulkApprovalItem, BulkApprovalRequest
     
     request = BulkApprovalRequest(
         action="approve",
