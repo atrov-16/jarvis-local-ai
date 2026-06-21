@@ -82,13 +82,14 @@ class GenericCommandTool(BaseTool):
             cwd = _get_validated_path(".", workspaces)
             
             # 3. Path Argument Validation
-            # Any argument that looks like an absolute path or relative upward path
-            # must be within the workspace.
             for i, arg in enumerate(args):
-                if arg.startswith("/") or arg.startswith("C:\\") or arg.startswith("../") or "..\\" in arg:
+                # Extract potential path from flags (e.g. --file=/etc/passwd -> /etc/passwd)
+                potential_path = arg.split("=", 1)[-1] if "=" in arg else arg
+                
+                # Check if it looks like a path (contains separators or traversal dots)
+                if ".." in potential_path or potential_path.startswith("/") or potential_path.startswith("\\") or ":" in potential_path[:5]:
                     try:
-                        # Attempt to validate if it looks like a path
-                        _get_validated_path(arg, workspaces)
+                        _get_validated_path(potential_path, workspaces)
                     except (PermissionError, ValueError) as e:
                         return ToolResult(success=False, error=f"Security Error: Argument {i+1} ('{arg}') escapes workspace: {e}")
 

@@ -103,6 +103,7 @@ class MemoryStore:
                 source="proposal_promotion",
                 importance=float(proposal.get("importance", 0.5)),
                 source_ids=proposal.get("source_ids", []),
+                confidence_score=float(proposal.get("confidence_score", 1.0)),
                 metadata=proposal.get("metadata", {}),
             )
 
@@ -219,6 +220,8 @@ class MemoryStore:
             if last_retrieved_str:
                 try:
                     last_retrieved = datetime.fromisoformat(str(last_retrieved_str))
+                    if last_retrieved.tzinfo is None:
+                        last_retrieved = last_retrieved.replace(tzinfo=UTC)
                     days_diff = (now - last_retrieved).total_seconds() / 86400
                     r_boost = min(0.1, 0.1 * (1.0 / (1.0 + max(0, days_diff))))
                 except ValueError:

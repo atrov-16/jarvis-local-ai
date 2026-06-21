@@ -68,16 +68,19 @@ class TaskQueue:
         subscription = self._event_bus.subscribe(max_queue_size=1000)
         try:
             while not self._stop_event.is_set():
-                event = await subscription.get()
-                if event.type == "memory.retrieved":
-                    memory_ids = event.payload.get("memory_ids", [])
-                    if memory_ids:
-                        try:
-                            async with self._uow.begin() as unit:
-                                assert unit.repositories is not None
-                                await unit.repositories.memory.update_memory_access(memory_ids)
-                        except Exception as e:
-                            LOG.exception(f"Failed to update memory access: {e}")
+                try:
+                    event = await subscription.get()
+                    if event.type == "memory.retrieved":
+                        memory_ids = event.payload.get("memory_ids", [])
+                        if memory_ids:
+                            try:
+                                async with self._uow.begin() as unit:
+                                    assert unit.repositories is not None
+                                    await unit.repositories.memory.update_memory_access(memory_ids)
+                            except Exception as e:
+                                LOG.exception(f"Failed to update memory access: {e}")
+                except Exception as e:
+                    LOG.exception(f"Unexpected error in event listener loop: {e}")
         except asyncio.CancelledError:
             pass
         finally:

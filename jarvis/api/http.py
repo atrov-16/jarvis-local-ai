@@ -538,7 +538,7 @@ def create_app(
             )
             row = await cursor.fetchone()
             if row:
-                await approval_broker.approve(row["id"])
+                await approval_broker.approve(row["id"], unit=unit)
 
             await unit.repositories.tasks.update(task_id, status="queued")
             await unit.repositories.tasks.insert_event(
