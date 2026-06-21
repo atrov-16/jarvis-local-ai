@@ -147,6 +147,12 @@ class CommandRunner:
                 stdout_data, stderr_data = await asyncio.wait_for(process.communicate(), timeout=2.0)
             except Exception:
                 pass
+        except asyncio.CancelledError:
+            if self._process_registry and task_id:
+                await self._process_registry.update_status(process_id, "terminated")
+            LOG.warning(f"Command '{cmd}' cancelled. Terminating process group.")
+            self._terminate_process(process)
+            raise
         except Exception as e:
             if self._process_registry and task_id:
                 await self._process_registry.update_status(process_id, "terminated")

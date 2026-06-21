@@ -385,9 +385,9 @@ class MemoryRepository:
         row = await cursor.fetchone()
         if row:
             data = dict(row)
-            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json", "[]")))
-            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
-            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            data["proposed_tags"] = json.loads(data.pop("proposed_tags_json") or "[]")
+            data["source_ids"] = json.loads(data.pop("source_ids_json") or "[]")
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             return data
         return None
 
@@ -455,9 +455,9 @@ class MemoryRepository:
         row = await cursor.fetchone()
         if row:
             data = dict(row)
-            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
-            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
-            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            data["tags"] = json.loads(data.pop("tags_json") or "[]")
+            data["source_ids"] = json.loads(data.pop("source_ids_json") or "[]")
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             return data
         return None
 
@@ -477,7 +477,14 @@ class MemoryRepository:
             JOIN long_term_memory_idx idx ON m.id = idx.id
             WHERE long_term_memory_idx MATCH ?
         """
-        params: list[object] = [query]
+        
+        query_sanitized = query.replace('"', '""')
+        if query_sanitized.endswith("*"):
+            fts_query = f'"{query_sanitized[:-1]}"*'
+        else:
+            fts_query = f'"{query_sanitized}"'
+            
+        params: list[object] = [fts_query]
 
         if project_id:
             sql += " AND (m.project_id = ? OR m.project_id IS NULL)"
@@ -494,14 +501,19 @@ class MemoryRepository:
         sql += " ORDER BY rank LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
-        cursor = await self._connection.execute(sql, tuple(params))
-        rows = await cursor.fetchall()
+        try:
+            cursor = await self._connection.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+        except aiosqlite.OperationalError:
+            # Catch FTS5 syntax errors
+            return []
+            
         results = []
         for row in rows:
             data = dict(row)
-            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
-            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
-            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            data["tags"] = json.loads(data.pop("tags_json") or "[]")
+            data["source_ids"] = json.loads(data.pop("source_ids_json") or "[]")
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             results.append(data)
         return results
 
@@ -557,9 +569,9 @@ class MemoryRepository:
         results = []
         for row in rows:
             data = dict(row)
-            data["tags"] = json.loads(str(data.pop("tags_json", "[]")))
-            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
-            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            data["tags"] = json.loads(data.pop("tags_json") or "[]")
+            data["source_ids"] = json.loads(data.pop("source_ids_json") or "[]")
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             results.append(data)
         return results
 
@@ -590,9 +602,9 @@ class MemoryRepository:
         results = []
         for row in rows:
             data = dict(row)
-            data["proposed_tags"] = json.loads(str(data.pop("proposed_tags_json", "[]")))
-            data["source_ids"] = json.loads(str(data.pop("source_ids_json", "[]")))
-            data["metadata"] = json.loads(str(data.pop("metadata_json", "{}")))
+            data["proposed_tags"] = json.loads(data.pop("proposed_tags_json") or "[]")
+            data["source_ids"] = json.loads(data.pop("source_ids_json") or "[]")
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             results.append(data)
         return results
 
@@ -619,6 +631,14 @@ class MemoryRepository:
             """,
             (now, *memory_ids)
         )
+
+    async def update_long_term_status(self, memory_id: str, status: str) -> bool:
+        """Update the status of a long term memory."""
+        cursor = await self._connection.execute(
+            "UPDATE long_term_memory SET status = ? WHERE id = ?",
+            (status, memory_id)
+        )
+        return cursor.rowcount > 0
 
 
 class TaskRepository:
@@ -669,7 +689,7 @@ class TaskRepository:
         row = await cursor.fetchone()
         if row:
             data = dict(row)
-            data["metadata"] = json.loads(str(data.pop("metadata_json")))
+            data["metadata"] = json.loads(data.pop("metadata_json") or "{}")
             return data
         return None
 

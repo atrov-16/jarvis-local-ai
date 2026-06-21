@@ -107,7 +107,8 @@ class ApprovalCenterService:
                 return {"id": item.id, "success": False, "error": str(e)}
 
         tasks = [handle_item(item) for item in request.items]
-        results = await asyncio.gather(*tasks)
+        for t in tasks:
+            results.append(await t)
         
         return {
             "action": request.action,

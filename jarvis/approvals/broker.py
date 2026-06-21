@@ -121,16 +121,16 @@ class ApprovalBroker:
                 
             return request["status"] == "approved"
 
-    async def approve(self, approval_id: str, decided_by: str = "user", reason: str | None = None) -> bool:
+    async def approve(self, approval_id: str, decided_by: str = "user", reason: str | None = None, unit: UnitOfWorkScope | None = None) -> bool:
         """Mark a request as approved."""
-        async with self._uow.begin() as unit:
-            assert unit.repositories is not None
-            success = await unit.repositories.approvals.update_status(
+        async def _do_approve(u: UnitOfWorkScope) -> bool:
+            assert u.repositories is not None
+            success = await u.repositories.approvals.update_status(
                 approval_id, "approved", decided_by=decided_by, reason=reason
             )
             if success:
-                request = await unit.repositories.approvals.get(approval_id)
-                await unit.repositories.audit.insert(
+                request = await u.repositories.approvals.get(approval_id)
+                await u.repositories.audit.insert(
                     actor=decided_by,
                     action_type="approval.approved",
                     summary=f"Approved action: {request['summary'] if request else approval_id}",
@@ -142,16 +142,22 @@ class ApprovalBroker:
                 await self._event_bus.publish("approval.approved", {"id": approval_id})
             return success
 
-    async def deny(self, approval_id: str, decided_by: str = "user", reason: str | None = None) -> bool:
+        if unit is not None:
+            return await _do_approve(unit)
+        else:
+            async with self._uow.begin() as u:
+                return await _do_approve(u)
+
+    async def deny(self, approval_id: str, decided_by: str = "user", reason: str | None = None, unit: UnitOfWorkScope | None = None) -> bool:
         """Mark a request as denied."""
-        async with self._uow.begin() as unit:
-            assert unit.repositories is not None
-            success = await unit.repositories.approvals.update_status(
+        async def _do_deny(u: UnitOfWorkScope) -> bool:
+            assert u.repositories is not None
+            success = await u.repositories.approvals.update_status(
                 approval_id, "denied", decided_by=decided_by, reason=reason
             )
             if success:
-                request = await unit.repositories.approvals.get(approval_id)
-                await unit.repositories.audit.insert(
+                request = await u.repositories.approvals.get(approval_id)
+                await u.repositories.audit.insert(
                     actor=decided_by,
                     action_type="approval.denied",
                     summary=f"Denied action: {request['summary'] if request else approval_id}",
@@ -162,3 +168,9 @@ class ApprovalBroker:
                 )
                 await self._event_bus.publish("approval.denied", {"id": approval_id})
             return success
+
+        if unit is not None:
+            return await _do_deny(unit)
+        else:
+            async with self._uow.begin() as u:
+                return await _do_deny(u)

@@ -14,14 +14,14 @@ from jarvis.storage.unit_of_work import UnitOfWork
 
 LOG = logging.getLogger(__name__)
 
-SUMMARY_PROMPT = """You are the Trace Analyst of Jarvis.
+SUMMARY_PROMPT_TEMPLATE = """You are the Trace Analyst of Jarvis.
 Analyze the following chronological trace of a completed task and provide a concise (2-3 sentence) summary of what happened, the key decisions made, and the final outcome.
 
-Task Request: {user_request}
-Status: {status}
+Task Request: %s
+Status: %s
 
 Trace:
-{trace_text}
+%s
 
 Provide ONLY the summary text. No preamble.
 """
@@ -150,10 +150,10 @@ class TraceService:
         
         try:
             messages = [
-                Message(role="system", content=SUMMARY_PROMPT.format(
-                    user_request=task["user_request"],
-                    status=task["status"],
-                    trace_text=trace_text
+                Message(role="system", content=SUMMARY_PROMPT_TEMPLATE % (
+                    task.get("user_request", "").replace("%", "%%"),
+                    task["status"],
+                    trace_text.replace("%", "%%")
                 )),
                 Message(role="user", content="Summarize this task.")
             ]
@@ -161,6 +161,7 @@ class TraceService:
             request = ModelRequest(messages=messages, temperature=0.0)
             response = await self._model_router.complete(request)
             summary = response.message.content.strip()
+            summary = redact_text(summary, secrets)
             
             # Cache the summary
             async with self._uow.begin() as unit:
