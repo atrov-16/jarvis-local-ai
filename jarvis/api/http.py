@@ -131,6 +131,15 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if jarvis_config.security.api_token_enabled and secrets.get_api_token() is None:
+            import secrets as std_secrets
+            import logging
+            new_token = std_secrets.token_urlsafe(32)
+            secrets.set_api_token(new_token)
+            logging.getLogger(__name__).warning(
+                f"\n{'='*60}\nNo API token configured. Auto-generated new token and saved to keyring.\nToken: {new_token}\n{'='*60}"
+            )
+
         async with sqlite_connection(db_path) as connection:
             applied = await run_migrations(connection)
         app.state.storage_status = {

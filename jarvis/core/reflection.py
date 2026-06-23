@@ -203,7 +203,7 @@ class ReflectionService:
             Message(role="user", content="Analyze the trace and propose any new Fact or Preference memories."),
         ]
         
-        request = ModelRequest(messages=messages, temperature=0.0)
+        request = ModelRequest(messages=messages, temperature=0.0, max_tokens=4096)
         response = await self._model_router.complete(request)
         content = response.message.content.strip()
         

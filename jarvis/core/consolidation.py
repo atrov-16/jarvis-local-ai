@@ -129,7 +129,7 @@ class ConsolidationService:
                 Message(role="user", content="Analyze this cluster for merges or conflicts."),
             ]
             
-            request = ModelRequest(messages=messages, temperature=0.0)
+            request = ModelRequest(messages=messages, temperature=0.0, max_tokens=4096)
             response = await self._model_router.complete(request)
             content = response.message.content.strip()
             

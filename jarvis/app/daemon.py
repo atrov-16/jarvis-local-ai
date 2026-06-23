@@ -13,6 +13,12 @@ from jarvis.logging.setup import setup_logging
 
 def run_daemon(config_path: Path | None = None) -> None:
     """Start the local FastAPI daemon."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+        
     config = load_config(config_path)
     setup_logging(config.logging.level)
     app = create_app(config=config)

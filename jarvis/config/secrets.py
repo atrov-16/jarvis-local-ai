@@ -25,6 +25,9 @@ class SecretManager:
     def get_openrouter_api_key(self) -> str | None:
         return self._get_secret(OPENROUTER_API_KEY_ENV, "OpenRouter")
 
+    def set_api_token(self, token: str) -> None:
+        self._set_secret(API_TOKEN_ENV, "API Token", token)
+
     def status(self) -> dict[str, bool]:
         return {
             "api_token_configured": self.get_api_token() is not None,
@@ -41,3 +44,10 @@ class SecretManager:
             return keyring.get_password(JARVIS_SERVICE, account)
         except Exception:
             return None
+
+    def _set_secret(self, env_name: str, account: str, value: str) -> None:
+        if self._use_keyring:
+            try:
+                keyring.set_password(JARVIS_SERVICE, account, value)
+            except Exception:
+                pass

@@ -93,6 +93,11 @@ async def test_consolidate_all_creates_merge_proposals(mock_uow, mock_model_rout
     assert args["metadata"]["merged_ids"] == ["1", "2"]
     assert args["importance"] == 0.6
 
+    # Verify max_tokens
+    mock_model_router.complete.assert_called_once()
+    req = mock_model_router.complete.call_args[0][0]
+    assert req.max_tokens == 4096
+
 
 @pytest.mark.asyncio
 async def test_consolidate_all_creates_conflict_proposals(mock_uow, mock_model_router, mock_memory_store):
