@@ -158,7 +158,7 @@ class TraceService:
                 Message(role="user", content="Summarize this task.")
             ]
             
-            request = ModelRequest(messages=messages, temperature=0.0)
+            request = ModelRequest(messages=messages, temperature=0.0, max_tokens=2048)
             response = await self._model_router.complete(request)
             summary = response.message.content.strip()
             summary = redact_text(summary, secrets)

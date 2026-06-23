@@ -68,6 +68,7 @@ class Planner:
         request = ModelRequest(
             messages=messages,
             temperature=0.0,  # Deterministic planning
+            max_tokens=2048,
         )
 
         

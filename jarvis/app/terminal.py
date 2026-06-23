@@ -15,6 +15,12 @@ from jarvis.app.daemon import run_daemon
 from jarvis.config.manager import load_config
 from jarvis.config.secrets import SecretManager
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 app = typer.Typer(help="Jarvis local assistant.")
 config_app = typer.Typer(help="Configuration commands.")
 workspace_app = typer.Typer(help="Workspace management.")

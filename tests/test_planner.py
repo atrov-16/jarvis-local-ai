@@ -34,6 +34,11 @@ async def test_planner_creates_valid_plan(planner, mock_router):
     assert plan.steps[0].title == "Step 1"
     assert plan.steps[0].requires_approval is False
     mock_router.complete.assert_called_once()
+    
+    # Verify the ModelRequest has the token cap
+    call_args = mock_router.complete.call_args[0]
+    request = call_args[0]
+    assert request.max_tokens == 2048
 
 async def test_planner_extracts_json_from_markdown(planner, mock_router):
     # Setup mock response with markdown

@@ -129,3 +129,8 @@ async def test_get_task_summary_generation(mock_uow, mock_model_router):
     meta = json.loads(args["metadata_json"])
     assert meta["summary"] == "Task was successful."
     assert meta["wall_time"] == "10.0s"
+
+    # Verify max_tokens
+    mock_model_router.complete.assert_called_once()
+    req = mock_model_router.complete.call_args[0][0]
+    assert req.max_tokens == 2048

@@ -128,4 +128,9 @@ async def test_reflect_on_task_creates_proposals(mock_uow, mock_model_router, mo
     assert args["confidence_score"] == 0.9
     assert args["task_id"] == "task1"
     assert args["project_id"] == "project1"
+
+    # Verify max_tokens
+    mock_model_router.complete.assert_called_once()
+    req = mock_model_router.complete.call_args[0][0]
+    assert req.max_tokens == 4096
     assert "engine" in args["metadata"]
