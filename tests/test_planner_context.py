@@ -7,6 +7,7 @@ import pytest
 from jarvis.models.router import ModelRouter
 from jarvis.models.schemas import Message, ModelResponse
 from jarvis.tasks.planner import Planner
+from jarvis.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -14,8 +15,12 @@ def mock_router():
     return MagicMock(spec=ModelRouter)
 
 @pytest.fixture
-def planner(mock_router):
-    return Planner(mock_router)
+def mock_registry():
+    return ToolRegistry()
+
+@pytest.fixture
+def planner(mock_router, mock_registry):
+    return Planner(mock_router, mock_registry)
 
 @pytest.mark.asyncio
 async def test_planner_injects_memory_context(planner, mock_router):

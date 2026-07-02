@@ -85,6 +85,32 @@ def test_task_approve(mock_client_ctx: MagicMock) -> None:
     mock_client.post.assert_called_with("/v1/tasks/t1/plan/approve")
 
 @patch("jarvis.app.terminal._get_api_client")
+def test_task_approve_step(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    
+    mock_resp = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    result = runner.invoke(app, ["task", "approve", "t1", "--step", "s1"])
+    assert result.exit_code == 0
+    assert "Task step approved: s1" in result.stdout
+    mock_client.post.assert_called_with("/v1/tasks/t1/steps/s1/approve", json={"reason": None})
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_deny(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    
+    mock_resp = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    result = runner.invoke(app, ["task", "deny", "t1", "--step", "s1", "--reason", "bad tool"])
+    assert result.exit_code == 0
+    assert "Task step denied: s1" in result.stdout
+    mock_client.post.assert_called_with("/v1/tasks/t1/steps/s1/deny", json={"reason": "bad tool"})
+
+@patch("jarvis.app.terminal._get_api_client")
 def test_task_resume(mock_client_ctx: MagicMock) -> None:
     mock_client = MagicMock()
     mock_client_ctx.return_value.__enter__.return_value = mock_client

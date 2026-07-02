@@ -99,7 +99,6 @@ def create_app(
     projects = ProjectRegistry(uow)
     memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
-    planner = Planner(model_router)
     approval_broker = ApprovalBroker(uow, bus)
     reflection_service = ReflectionService(uow, bus, model_router, memory_store)
     trace_service = TraceService(uow, model_router)
@@ -127,6 +126,7 @@ def create_app(
     registry.register(GetTaskStatusTool())
     tool_executor = ToolExecutor(registry, approval_broker)
 
+    planner = Planner(model_router, registry)
     task_queue = TaskQueue(uow, bus, planner, tool_executor, approval_broker)
 
     @asynccontextmanager
@@ -444,12 +444,21 @@ def create_app(
     # Task Endpoints
     @app.post("/v1/tasks", response_model=TaskResponse, status_code=201)
     async def create_task(data: TaskCreate, _: None = Depends(require_api_token)) -> TaskResponse:
+        project_id = data.project_id
+        if not project_id:
+            project_id = await projects.get_current_id()
+            if not project_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No project specified and no current project set. Please select or create a project first."
+                )
+
         async with uow.begin() as unit:
             assert unit.repositories is not None
             task_id = await unit.repositories.tasks.insert(
                 title="New Task",  # Will be updated by Planner
                 user_request=data.user_request,
-                project_id=data.project_id,
+                project_id=project_id,
                 priority=data.priority,
             )
             await unit.repositories.audit.insert(

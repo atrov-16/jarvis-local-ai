@@ -224,6 +224,8 @@ def project_list(config: Path | None = typer.Option(None, "--config", "-c")) -> 
 
 
 @project_app.command("switch")
+@project_app.command("use")
+@project_app.command("select")
 def project_switch(
     name: str, config: Path | None = typer.Option(None, "--config", "-c")
 ) -> None:
@@ -547,9 +549,10 @@ def task_status(
 @task_app.command("approve")
 def task_approve(
     task_id: str,
+    step: str | None = typer.Option(None, "--step", "-s", help="Approve a specific step (tool approval)."),
     config: Path | None = typer.Option(None, "--config", "-c"),
 ) -> None:
-    """Approve a task plan."""
+    """Approve a task plan or tool execution step."""
     with _get_api_client(config) as client:
         try:
             if len(task_id) < 36:
@@ -560,9 +563,54 @@ def task_approve(
                         task_id = t["id"]
                         break
 
-            resp = client.post(f"/v1/tasks/{task_id}/plan/approve")
+            if step:
+                if len(step) < 36:
+                    resp_s = client.get(f"/v1/tasks/{task_id}")
+                    resp_s.raise_for_status()
+                    for s in resp_s.json().get("steps", []):
+                        if s["id"].startswith(step):
+                            step = s["id"]
+                            break
+
+                resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/approve", json={"reason": None})
+                resp.raise_for_status()
+                console.print(f"[green]Task step approved:[/green] {step[:8]}")
+            else:
+                resp = client.post(f"/v1/tasks/{task_id}/plan/approve")
+                resp.raise_for_status()
+                console.print(f"[green]Task plan approved:[/green] {task_id[:8]}")
+        except Exception as e:
+            _handle_api_error(e)
+
+@task_app.command("deny")
+def task_deny(
+    task_id: str,
+    step: str = typer.Option(..., "--step", "-s", help="Deny a specific step (tool approval)."),
+    reason: str | None = typer.Option(None, "--reason", "-r", help="Reason for denying the step."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Deny a tool execution step."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+            
+            if len(step) < 36:
+                resp_s = client.get(f"/v1/tasks/{task_id}")
+                resp_s.raise_for_status()
+                for s in resp_s.json().get("steps", []):
+                    if s["id"].startswith(step):
+                        step = s["id"]
+                        break
+
+            resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/deny", json={"reason": reason})
             resp.raise_for_status()
-            console.print(f"[green]Task plan approved:[/green] {task_id[:8]}")
+            console.print(f"[yellow]Task step denied:[/yellow] {step[:8]}")
         except Exception as e:
             _handle_api_error(e)
 
