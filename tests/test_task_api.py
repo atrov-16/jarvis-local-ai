@@ -16,6 +16,10 @@ def client(tmp_path):
         secret_manager=SecretManager({"JARVIS_API_TOKEN": "test-token"}, use_keyring=False),
     )
     with TestClient(app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        resp = client.post("/v1/projects", headers=headers, json={"name": "test-project"})
+        project_id = resp.json()["id"]
+        client.post("/v1/projects/current", headers=headers, json={"id": project_id})
         yield client
 
 def test_task_create_and_list(client):

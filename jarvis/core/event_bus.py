@@ -45,9 +45,3 @@ class EventBus:
             await queue.put(event)
         return event
 
-    async def publish_event(self, event: Event) -> Event:
-        ensure_json_payload(event.payload)
-        for queue in list(self._subscribers):
-            await queue.put(event)
-        return event
-

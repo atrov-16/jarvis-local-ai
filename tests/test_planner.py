@@ -7,15 +7,34 @@ import pytest
 from jarvis.models.router import ModelRouter
 from jarvis.models.schemas import Message, ModelResponse
 from jarvis.tasks.planner import Planner
+from jarvis.tools.registry import ToolRegistry
+from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
+from pydantic import BaseModel
 
+class DummyToolInput(BaseModel):
+    arg: str
+
+class DummyTool(BaseTool):
+    def __init__(self, name: str):
+        super().__init__(name=name, description=f"Dummy tool {name}", category=ToolCategory.READ_ONLY)
+    def get_input_schema(self):
+        return DummyToolInput
+    async def execute(self, **kwargs):
+        return ToolResult(success=True)
 
 @pytest.fixture
 def mock_router():
     return MagicMock(spec=ModelRouter)
 
 @pytest.fixture
-def planner(mock_router):
-    return Planner(mock_router)
+def mock_registry():
+    registry = ToolRegistry()
+    registry.register(DummyTool("test_tool_1"))
+    return registry
+
+@pytest.fixture
+def planner(mock_router, mock_registry):
+    return Planner(mock_router, mock_registry)
 
 async def test_planner_creates_valid_plan(planner, mock_router):
     # Setup mock response
@@ -78,3 +97,39 @@ async def test_planner_handles_invalid_json(planner, mock_router):
     
     with pytest.raises(ValueError, match="Failed to parse planner output as JSON"):
         await planner.create_plan("Garbage test")
+
+async def test_planner_prompt_contains_registered_tools(planner, mock_router, mock_registry):
+    mock_response = ModelResponse(
+        message=Message(role="assistant", content='{"title": "T", "steps": []}'),
+        provider_name="test",
+        model_used="test"
+    )
+    mock_router.complete = AsyncMock(return_value=mock_response)
+    
+    await planner.create_plan("Test tools")
+    
+    call_args = mock_router.complete.call_args[0]
+    sys_msg = call_args[0].messages[0].content
+    
+    assert "Available Tools:" in sys_msg
+    assert "- Name: test_tool_1" in sys_msg
+    assert "Dummy tool test_tool_1" in sys_msg
+
+async def test_adding_tool_updates_prompt(planner, mock_router, mock_registry):
+    mock_response = ModelResponse(
+        message=Message(role="assistant", content='{"title": "T", "steps": []}'),
+        provider_name="test",
+        model_used="test"
+    )
+    mock_router.complete = AsyncMock(return_value=mock_response)
+    
+    # Add new tool
+    mock_registry.register(DummyTool("new_dynamic_tool"))
+    
+    await planner.create_plan("Test tools")
+    
+    call_args = mock_router.complete.call_args[0]
+    sys_msg = call_args[0].messages[0].content
+    
+    assert "- Name: test_tool_1" in sys_msg
+    assert "- Name: new_dynamic_tool" in sys_msg

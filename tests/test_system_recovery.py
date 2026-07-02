@@ -121,13 +121,13 @@ async def test_run_startup_recovery(
     
     # Extract the events passed to publish
     calls = mock_event_bus.publish.call_args_list
-    event_1 = calls[0][0][0]
-    event_2 = calls[1][0][0]
+    event_1_type, event_1_payload = calls[0][0]
+    event_2_type, event_2_payload = calls[1][0]
     
-    assert event_1.type == "task.recovered"
-    assert event_1.payload["task_id"] == "task_1"
-    assert event_1.payload["orphan_process_terminated"] is True
+    assert event_1_type == "task.recovered"
+    assert event_1_payload["task_id"] == "task_1"
+    assert event_1_payload["orphan_process_terminated"] is True
     
-    assert event_2.type == "task.recovered"
-    assert event_2.payload["task_id"] == "task_2"
-    assert event_2.payload["orphan_process_terminated"] is False
+    assert event_2_type == "task.recovered"
+    assert event_2_payload["task_id"] == "task_2"
+    assert event_2_payload["orphan_process_terminated"] is False

@@ -44,6 +44,9 @@ def app(uow, event_bus, tmp_path):
 def client(app):
     with TestClient(app) as c:
         c.headers["Authorization"] = "Bearer test-token"
+        resp = c.post("/v1/projects", json={"name": "test-project"})
+        project_id = resp.json()["id"]
+        c.post("/v1/projects/current", json={"id": project_id})
         yield c
 
 @pytest.fixture

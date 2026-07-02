@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from jarvis.models.router import ModelRouter
 from jarvis.models.schemas import Message, ModelRequest
+from jarvis.tools.registry import ToolRegistry
 
 
 class PlannedStep(BaseModel):
@@ -34,6 +35,9 @@ Rules:
 5. Output ONLY a valid JSON object matching the requested schema.
 6. Decision Precedence: If [Decision] memories are provided in the context, treat them as absolute, non-negotiable rules.
 7. Conflict Resolution: If injected memories conflict, prefer [Decision] over [Preference] or [Fact], and prefer (Project) scoped memories over (Global) ones.
+8. Use ONLY the tools listed below.
+9. Do not invent tool names.
+10. If no listed tool is appropriate, leave `tool_name` null.
 
 Schema:
 {
@@ -51,12 +55,24 @@ Schema:
 """
 
 class Planner:
-    def __init__(self, model_router: ModelRouter) -> None:
+    def __init__(self, model_router: ModelRouter, tool_registry: ToolRegistry) -> None:
         self._model_router = model_router
+        self._tool_registry = tool_registry
 
     async def create_plan(self, user_request: str, memory_context: str = "") -> PlannedTask:
         """Use the LLM to generate a plan for the user request."""
         system_prompt = PLANNER_PROMPT
+        
+        # Inject tool list
+        tools_info = []
+        for name, tool in self._tool_registry._tools.items():
+            schema = tool.get_input_schema().model_json_schema()
+            tools_info.append(
+                f"- Name: {name}\n  Category: {tool.category.value}\n  Description: {tool.description}\n  Schema: {json.dumps(schema)}"
+            )
+        
+        system_prompt += "\n\nAvailable Tools:\n" + "\n".join(tools_info)
+        
         if memory_context:
             system_prompt += f"\n\n{memory_context}"
 

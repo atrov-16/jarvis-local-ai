@@ -84,12 +84,12 @@ class SystemRecoveryService:
                 )
                 
                 # Publish event via EventBus
-                await self._event_bus.publish(Event(
-                    type="task.recovered",
-                    payload={
+                await self._event_bus.publish(
+                    "task.recovered",
+                    {
                         "task_id": task_id,
                         **recovery_metadata
                     }
-                ))
+                )
                 
                 LOG.info(f"Recovered task {task_id}: transitioned from {previous_status} to {new_status}.")
