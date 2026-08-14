@@ -135,3 +135,129 @@ def test_task_cancel(mock_client_ctx: MagicMock) -> None:
     assert result.exit_code == 0
     assert "Task cancelled: t1" in result.stdout
     mock_client.post.assert_called_with("/v1/tasks/t1/cancel")
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_completed(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    
+    task_data = {
+        "id": "task-completed-12345678901234567890",
+        "title": "Completed Task Title",
+        "user_request": "Do work",
+        "status": "completed",
+        "project_id": "proj-abc",
+        "steps": [
+            {
+                "id": "step-1",
+                "step_index": 0,
+                "title": "Step One",
+                "status": "completed",
+                "tool_name": "write_file",
+                "output_json": '{"bytes": 42}'
+            }
+        ]
+    }
+    
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url == "/v1/tasks":
+            resp.json.return_value = [task_data]
+        else:
+            resp.json.return_value = task_data
+        return resp
+
+    mock_client.get.side_effect = mock_get
+
+    result = runner.invoke(app, ["task", "show", "task-completed"])
+    assert result.exit_code == 0
+    assert "Completed Task Title" in result.stdout
+    assert "completed" in result.stdout
+    assert "proj-abc" in result.stdout
+    assert "write_file" in result.stdout
+    assert "step-1" in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_failed(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    
+    task_data = {
+        "id": "task-failed-12345678901234567890",
+        "title": "Failed Task Title",
+        "user_request": "Do illegal work",
+        "status": "failed",
+        "project_id": None,
+        "steps": [
+            {
+                "id": "step-fail-1",
+                "step_index": 0,
+                "title": "Write Outside",
+                "status": "failed",
+                "tool_name": "write_file",
+                "error": "Path is outside allowed workspaces: /etc/passwd"
+            }
+        ]
+    }
+    
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url == "/v1/tasks":
+            resp.json.return_value = [task_data]
+        else:
+            resp.json.return_value = task_data
+        return resp
+
+    mock_client.get.side_effect = mock_get
+
+    result = runner.invoke(app, ["task", "show", "task-failed"])
+    assert result.exit_code == 0
+    assert "Failed Task Title" in result.stdout
+    assert "failed" in result.stdout
+    assert "Error:" in result.stdout
+    assert "passwd" in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_waiting_for_approval(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    
+    task_data = {
+        "id": "task-approval-12345678901234567890",
+        "title": "Approval Task Title",
+        "user_request": "Delete database",
+        "status": "paused",
+        "project_id": "proj-xyz",
+        "steps": [
+            {
+                "id": "step-approval-999",
+                "step_index": 0,
+                "title": "Delete database file",
+                "status": "waiting_for_approval",
+                "tool_name": "generic_command",
+                "output_json": None,
+                "error": None
+            }
+        ]
+    }
+    
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url == "/v1/tasks":
+            resp.json.return_value = [task_data]
+        else:
+            resp.json.return_value = task_data
+        return resp
+
+    mock_client.get.side_effect = mock_get
+
+    result = runner.invoke(app, ["task", "show", "task-approval"])
+    assert result.exit_code == 0
+    assert "Approval Task Title" in result.stdout
+    assert "step-approval-999" in result.stdout
+    assert "Steps Waiting for Approval:" in result.stdout
+    assert "uv run jarvis task approve task-app --step step-approval-999" in result.stdout
+
