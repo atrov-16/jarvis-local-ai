@@ -320,6 +320,15 @@ class TaskQueue:
                 tool_category = tool.category
             except KeyError:
                 await unit.repositories.tasks.update_step(step_id, status="failed", error=f"Tool not found: {tool_name}")
+                await unit.repositories.tasks.update(task_id, status="failed")
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="status_change",
+                    message=f"Task failed: Tool not found '{tool_name}'",
+                    payload={"status": "failed", "error": f"Tool not found: {tool_name}"},
+                    severity="error"
+                )
                 return False
 
             # Unified Risk Classification
@@ -439,6 +448,16 @@ class TaskQueue:
                     event_type="step_failed",
                     message=f"Step failed: {result.error}",
                     payload={"error": result.error, "timeout": result.timeout_occurred},
+                    severity="error",
+                    correlation_id=approval_request_id
+                )
+                await unit.repositories.tasks.update(task_id, status="failed")
+                await unit.repositories.tasks.insert_event(
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="status_change",
+                    message=f"Task failed due to step failure: {result.error}",
+                    payload={"status": "failed", "error": result.error},
                     severity="error",
                     correlation_id=approval_request_id
                 )

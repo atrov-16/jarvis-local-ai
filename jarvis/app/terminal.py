@@ -161,6 +161,17 @@ def workspace_list(config: Path | None = typer.Option(None, "--config", "-c")) -
             _handle_api_error(e)
 
 
+@workspace_app.command("attach")
+def workspace_attach(
+    workspace_id: str,
+    project: str = typer.Option(..., "--project", "-p", help="Project ID or name to attach to."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Attach a workspace to a project."""
+    # This is an alias functionality-wise to `project link-workspace`, so we just call it.
+    project_link_workspace(project_id=project, workspace_id=workspace_id, config=config)
+
+
 @workspace_app.command("remove")
 def workspace_remove(
     workspace_id: str, config: Path | None = typer.Option(None, "--config", "-c")
@@ -251,6 +262,44 @@ def project_switch(
             resp = client.post("/v1/projects/current", json={"id": project_id})
             resp.raise_for_status()
             console.print(f"[green]Switched to project:[/green] {name}")
+        except Exception as e:
+            _handle_api_error(e)
+
+
+@project_app.command("link-workspace")
+def project_link_workspace(
+    project_id: str,
+    workspace_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Link a workspace to a project."""
+    with _get_api_client(config) as client:
+        try:
+            # We assume project_id and workspace_id are correct exact IDs or short IDs.
+            # To be robust, we could resolve them, but let's just use them if they exist.
+            # It's better to try to resolve them to full IDs first.
+            
+            # Resolve project ID
+            resp_projects = client.get("/v1/projects")
+            resp_projects.raise_for_status()
+            full_project_id = project_id
+            for p in resp_projects.json():
+                if p["id"].startswith(project_id) or p["name"].lower() == project_id.lower():
+                    full_project_id = p["id"]
+                    break
+                    
+            # Resolve workspace ID
+            resp_workspaces = client.get("/v1/workspaces")
+            resp_workspaces.raise_for_status()
+            full_workspace_id = workspace_id
+            for w in resp_workspaces.json():
+                if w["id"].startswith(workspace_id) or w["name"].lower() == workspace_id.lower():
+                    full_workspace_id = w["id"]
+                    break
+
+            resp = client.post(f"/v1/projects/{full_project_id}/workspaces/{full_workspace_id}")
+            resp.raise_for_status()
+            console.print(f"[green]Successfully linked workspace[/green] {full_workspace_id[:8]} [green]to project[/green] {full_project_id[:8]}")
         except Exception as e:
             _handle_api_error(e)
 

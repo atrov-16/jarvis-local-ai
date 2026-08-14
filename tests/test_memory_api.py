@@ -111,3 +111,63 @@ def test_approve_missing_proposal(client):
         json={"title": "Test"}
     )
     assert response.status_code == 400
+
+
+def test_cli_memory_routes(client):
+    headers = {"Authorization": "Bearer test-token"}
+    from jarvis.memory.store import MemoryStore
+    store: MemoryStore = client.app.state.memory_store
+    import asyncio
+    
+    # 1. Test /v1/memory/proposals
+    proposal_id = asyncio.run(store.propose(
+        memory_type="preference",
+        proposed_content="User prefers Python",
+        reason="Observed coding"
+    ))
+    
+    response = client.get("/v1/memory/proposals", headers=headers)
+    assert response.status_code == 200
+    proposals = response.json()
+    assert any(p["id"] == proposal_id for p in proposals)
+    
+    # 2. Test /v1/memory/proposals/{proposal_id}/approve
+    response = client.post(
+        f"/v1/memory/proposals/{proposal_id}/approve",
+        headers=headers,
+        json={"title": "Python Preference"}
+    )
+    assert response.status_code == 200
+    memory_id = response.json()["id"]
+    
+    # 3. Test /v1/memory/search
+    response = client.get("/v1/memory/search?q=Python", headers=headers)
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) >= 1
+    assert results[0]["id"] == memory_id
+    assert "relevance_score" in results[0]
+    
+    # 4. Test /v1/memory/long-term
+    response = client.get("/v1/memory/long-term", headers=headers)
+    assert response.status_code == 200
+    memories = response.json()
+    assert any(m["id"] == memory_id for m in memories)
+    
+    # 5. Test /v1/memory/long-term/{memory_id} (delete)
+    response = client.delete(f"/v1/memory/long-term/{memory_id}", headers=headers)
+    assert response.status_code == 200
+    
+    # 6. Test /v1/memory/proposals/{proposal_id}/deny
+    proposal_id_2 = asyncio.run(store.propose(
+        memory_type="note",
+        proposed_content="Temporary note",
+        reason="Testing denial"
+    ))
+    response = client.post(
+        f"/v1/memory/proposals/{proposal_id_2}/deny",
+        headers=headers,
+        json={"reason": "Denied"}
+    )
+    assert response.status_code == 200
+

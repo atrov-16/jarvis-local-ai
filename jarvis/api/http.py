@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -295,6 +296,7 @@ def create_app(
 
     # Memory Browser & Proposal Endpoints
     @app.get("/v1/memories/proposals", response_model=list[MemoryProposalResponse])
+    @app.get("/v1/memory/proposals", response_model=list[MemoryProposalResponse])
     async def list_memory_proposals(
         project_id: str | None = None,
         status: str = "pending",
@@ -305,6 +307,7 @@ def create_app(
         return await memory_browser.list_proposals(project_id=project_id, status=status, limit=limit, offset=offset)
 
     @app.get("/v1/memories/proposals/{proposal_id}", response_model=MemoryProposalResponse)
+    @app.get("/v1/memory/proposals/{proposal_id}", response_model=MemoryProposalResponse)
     async def get_memory_proposal(proposal_id: str, _: None = Depends(require_api_token)) -> MemoryProposalResponse:
         try:
             return await memory_browser.get_proposal(proposal_id)
@@ -312,6 +315,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(e))
 
     @app.post("/v1/memories/proposals/{proposal_id}/approve", response_model=MemoryResponse)
+    @app.post("/v1/memory/proposals/{proposal_id}/approve", response_model=MemoryResponse)
     async def approve_memory_proposal(
         proposal_id: str, data: MemoryApproveRequest, _: None = Depends(require_api_token)
     ) -> MemoryResponse:
@@ -326,6 +330,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e))
 
     @app.post("/v1/memories/proposals/{proposal_id}/deny")
+    @app.post("/v1/memory/proposals/{proposal_id}/deny")
     async def deny_memory_proposal(
         proposal_id: str, data: MemoryDenialRequest, _: None = Depends(require_api_token)
     ) -> JSONResponse:
@@ -334,6 +339,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="Proposal not found.")
         return JSONResponse({"denied": True})
 
+    @app.get("/v1/memory/search")
+    async def search_memory_api(
+        q: str | None = None,
+        project_id: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = "active",
+        limit: int = 50,
+        offset: int = 0,
+        _: None = Depends(require_api_token)
+    ) -> list[dict[str, Any]]:
+        results = await memory_store.search(
+            q or "",
+            project_id=project_id,
+            memory_type=memory_type,
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+        return [asdict(r) for r in results]
+
+    @app.get("/v1/memory/long-term", response_model=list[MemoryResponse])
     @app.get("/v1/memories", response_model=list[MemoryResponse])
     async def list_memories(
         project_id: str | None = None,
@@ -379,6 +405,7 @@ def create_app(
             assert m is not None
             return MemoryResponse.model_validate(m)
 
+    @app.delete("/v1/memory/long-term/{memory_id}")
     @app.delete("/v1/memories/{memory_id}")
     async def delete_memory(
         memory_id: str, _: None = Depends(require_api_token)
