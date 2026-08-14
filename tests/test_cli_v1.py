@@ -36,6 +36,17 @@ def test_workspace_commands(monkeypatch) -> None:
         assert result.exit_code == 0
         assert "Removed workspace: w1" in result.output
 
+        # Test workspace attach
+        mock_client.get.side_effect = [
+            MagicMock(status_code=200, json=lambda: [{"id": "p1", "name": "P1"}]),
+            MagicMock(status_code=200, json=lambda: [{"id": "w1", "name": "W1"}])
+        ]
+        mock_client.post.return_value = MagicMock(status_code=200)
+        result = runner.invoke(app, ["workspace", "attach", "w1", "--project", "p1"])
+        assert result.exit_code == 0
+        assert "Successfully linked workspace" in result.output
+        mock_client.post.assert_called_with("/v1/projects/p1/workspaces/w1")
+
 def test_project_commands() -> None:
     runner = CliRunner()
     
@@ -60,12 +71,23 @@ def test_project_commands() -> None:
 
         # Test project switch
         mock_client.get.side_effect = [
-            MagicMock(status_code=200, json=lambda: [{"id": "p1", "name": "P1", "status": "active"}]),
+            MagicMock(status_code=200, json=lambda: [{"id": "p1", "name": "P1", "status": "active"}])
         ]
         mock_client.post.return_value = MagicMock(status_code=200)
-        result = runner.invoke(app, ["project", "switch", "P1"])
+        result = runner.invoke(app, ["project", "switch", "p1"])
         assert result.exit_code == 0
         assert "Switched to project: P1" in result.output
+
+        # Test project link-workspace
+        mock_client.get.side_effect = [
+            MagicMock(status_code=200, json=lambda: [{"id": "p1", "name": "P1"}]),
+            MagicMock(status_code=200, json=lambda: [{"id": "w1", "name": "W1"}])
+        ]
+        mock_client.post.return_value = MagicMock(status_code=200)
+        result = runner.invoke(app, ["project", "link-workspace", "p1", "w1"])
+        assert result.exit_code == 0
+        assert "Successfully linked workspace" in result.output
+        mock_client.post.assert_called_with("/v1/projects/p1/workspaces/w1")
 
 def test_status_command_extension() -> None:
     runner = CliRunner()

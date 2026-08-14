@@ -126,3 +126,98 @@ async def test_claimed_at_updated(task_queue, uow, mock_planner):
         
     assert task["claimed_at"] is not None
     await task_queue.stop()
+
+
+async def test_task_step_missing_tool_transitions_parent_task_to_failed(task_queue, uow, mock_planner):
+    mock_planner.create_plan = AsyncMock(return_value=PlannedTask(
+        title="Failing Task",
+        steps=[PlannedStep(title="Step 1", description="Do it", tool_name="nonexistent_tool")]
+    ))
+    
+    async with uow.begin() as unit:
+        task_id = await unit.repositories.tasks.insert(title="Failing Task", user_request="Perform failing test")
+        
+    await task_queue.start()
+    
+    max_wait = 10
+    while max_wait > 0:
+        async with uow.begin() as unit:
+            task = await unit.repositories.tasks.get(task_id)
+            if task["status"] == "waiting_for_plan_approval":
+                break
+        await asyncio.sleep(0.1)
+        max_wait -= 1
+        
+    assert task["status"] == "waiting_for_plan_approval"
+    
+    async with uow.begin() as unit:
+        await unit.repositories.tasks.update(task_id, status="queued")
+        
+    max_wait = 50
+    while max_wait > 0:
+        async with uow.begin() as unit:
+            task = await unit.repositories.tasks.get(task_id)
+            if task["status"] == "failed":
+                break
+        await asyncio.sleep(0.1)
+        max_wait -= 1
+        
+    assert task["status"] == "failed"
+    
+    async with uow.begin() as unit:
+        steps = await unit.repositories.tasks.list_steps(task_id)
+        assert steps[0]["status"] == "failed"
+        assert "Tool not found" in steps[0]["error"]
+        
+    await task_queue.stop()
+
+
+async def test_task_tool_execution_failure_transitions_parent_task_to_failed(task_queue, uow, mock_planner, mock_tool_executor):
+    from jarvis.tools.base import ToolResult
+    mock_tool = MagicMock()
+    mock_tool.category = "read_only"
+    mock_tool_executor._registry.get = MagicMock(return_value=mock_tool)
+    mock_tool_executor.execute_step = AsyncMock(return_value=ToolResult(success=False, error="Execution error"))
+    
+    mock_planner.create_plan = AsyncMock(return_value=PlannedTask(
+        title="Failing Execution Task",
+        steps=[PlannedStep(title="Step 1", description="Do it", tool_name="write_file")]
+    ))
+    
+    async with uow.begin() as unit:
+        task_id = await unit.repositories.tasks.insert(title="Failing Exec Task", user_request="Perform exec failure")
+        
+    await task_queue.start()
+    
+    max_wait = 10
+    while max_wait > 0:
+        async with uow.begin() as unit:
+            task = await unit.repositories.tasks.get(task_id)
+            if task["status"] == "waiting_for_plan_approval":
+                break
+        await asyncio.sleep(0.1)
+        max_wait -= 1
+        
+    assert task["status"] == "waiting_for_plan_approval"
+    
+    async with uow.begin() as unit:
+        await unit.repositories.tasks.update(task_id, status="queued")
+        
+    max_wait = 50
+    while max_wait > 0:
+        async with uow.begin() as unit:
+            task = await unit.repositories.tasks.get(task_id)
+            if task["status"] == "failed":
+                break
+        await asyncio.sleep(0.1)
+        max_wait -= 1
+        
+    assert task["status"] == "failed"
+    
+    async with uow.begin() as unit:
+        steps = await unit.repositories.tasks.list_steps(task_id)
+        assert steps[0]["status"] == "failed"
+        assert steps[0]["error"] == "Execution error"
+        
+    await task_queue.stop()
+
