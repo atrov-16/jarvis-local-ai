@@ -595,6 +595,85 @@ def task_status(
             _handle_api_error(e)
 
 
+@task_app.command("show")
+def task_show(
+    task_id: str,
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Show detailed task information, project metadata, and step breakdown."""
+    with _get_api_client(config) as client:
+        try:
+            if len(task_id) < 36:
+                resp_t = client.get("/v1/tasks")
+                resp_t.raise_for_status()
+                for t in resp_t.json():
+                    if t["id"].startswith(task_id):
+                        task_id = t["id"]
+                        break
+
+            resp = client.get(f"/v1/tasks/{task_id}")
+            resp.raise_for_status()
+            task = resp.json()
+
+            console.print(f"[bold]Task ID:[/bold] {task['id']}")
+            console.print(f"[bold]Title:[/bold] {task['title']}")
+            console.print(f"[bold]User Request:[/bold] {task.get('user_request', '-')}")
+            console.print(f"[bold]Status:[/bold] {task['status']}")
+            if task.get("project_id"):
+                console.print(f"[bold]Project ID:[/bold] {task['project_id']}")
+
+            steps = task.get("steps", [])
+            if not steps:
+                console.print("No steps yet.")
+                return
+
+            table = Table(title="Task Steps")
+            table.add_column("#", justify="right", style="dim")
+            table.add_column("Step ID", style="dim")
+            table.add_column("Status", style="cyan")
+            table.add_column("Title")
+            table.add_column("Tool")
+            table.add_column("Details / Error", max_width=60)
+
+            waiting_steps = []
+            for s in steps:
+                step_id_display = s["id"]
+                if s["status"] == "waiting_for_approval":
+                    step_id_display = f"[bold yellow]{s['id']}[/bold yellow]"
+                    waiting_steps.append(s)
+
+                tool_display = s.get("tool_name") or "-"
+                
+                details = []
+                if s.get("error"):
+                    details.append(f"[red]Error: {s['error']}[/red]")
+                elif s.get("output_json"):
+                    out = s["output_json"]
+                    if len(out) > 80:
+                        out = out[:77] + "..."
+                    details.append(f"Output: {out}")
+                
+                table.add_row(
+                    str(s["step_index"]),
+                    step_id_display,
+                    s["status"],
+                    s["title"],
+                    tool_display,
+                    "\n".join(details) if details else "-"
+                )
+
+            console.print(table)
+
+            if waiting_steps:
+                console.print("\n[yellow]Steps Waiting for Approval:[/yellow]")
+                for ws in waiting_steps:
+                    console.print(f"  To approve: [bold]uv run jarvis task approve {task['id'][:8]} --step {ws['id']}[/bold]")
+
+        except Exception as e:
+            _handle_api_error(e)
+
+
+
 @task_app.command("approve")
 def task_approve(
     task_id: str,
