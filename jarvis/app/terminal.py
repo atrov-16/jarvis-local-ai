@@ -47,6 +47,9 @@ def _handle_api_error(e: Exception) -> None:
             console.print(Panel("Unauthorized: Valid local API token required.", title="Error", style="red"))
         elif e.response.status_code == 400:
             console.print(Panel(f"Bad Request: {e.response.json().get('detail', 'Unknown error')}", title="Error", style="red"))
+        elif e.response.status_code == 409:
+            detail = e.response.json().get("detail", "Unknown error")
+            console.print(Panel(f"Conflict: {detail}", title="Error", style="red"))
         else:
             console.print(Panel(f"API Error: {e.response.status_code} - {e.response.text}", title="Error", style="red"))
     else:

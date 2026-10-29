@@ -75,7 +75,19 @@ def test_task_approve_plan(client):
         async with client.app.state.task_queue._uow.begin() as unit:
             await unit.repositories.tasks.update(task_id, status="waiting_for_plan_approval")
     asyncio.run(set_status())
-    
+
+    # Plan approval requires a plan approval request bound to the task.
+    response = client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers)
+    assert response.status_code == 409
+
+    async def create_plan_request():
+        async with client.app.state.task_queue._uow.begin() as unit:
+            await unit.repositories.approvals.insert(
+                task_id=task_id, action_type="plan", risk_level="medium",
+                summary="Approve plan", action_json="{}", action_hash="h",
+            )
+    asyncio.run(create_plan_request())
+
     response = client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers)
     assert response.status_code == 200
     

@@ -121,12 +121,20 @@ class ApprovalBroker:
                 
             return request["status"] == "approved"
 
-    async def approve(self, approval_id: str, decided_by: str = "user", reason: str | None = None, unit: UnitOfWorkScope | None = None) -> bool:
-        """Mark a request as approved."""
+    async def approve(
+        self,
+        approval_id: str,
+        decided_by: str = "user",
+        reason: str | None = None,
+        unit: UnitOfWorkScope | None = None,
+        expected_status: str = "pending",
+    ) -> bool:
+        """Mark a request as approved, only if it is still in `expected_status`."""
         async def _do_approve(u: UnitOfWorkScope) -> bool:
             assert u.repositories is not None
             success = await u.repositories.approvals.update_status(
-                approval_id, "approved", decided_by=decided_by, reason=reason
+                approval_id, "approved", decided_by=decided_by, reason=reason,
+                expected_status=expected_status,
             )
             if success:
                 request = await u.repositories.approvals.get(approval_id)
@@ -148,12 +156,20 @@ class ApprovalBroker:
             async with self._uow.begin() as u:
                 return await _do_approve(u)
 
-    async def deny(self, approval_id: str, decided_by: str = "user", reason: str | None = None, unit: UnitOfWorkScope | None = None) -> bool:
-        """Mark a request as denied."""
+    async def deny(
+        self,
+        approval_id: str,
+        decided_by: str = "user",
+        reason: str | None = None,
+        unit: UnitOfWorkScope | None = None,
+        expected_status: str = "pending",
+    ) -> bool:
+        """Mark a request as denied, only if it is still in `expected_status`."""
         async def _do_deny(u: UnitOfWorkScope) -> bool:
             assert u.repositories is not None
             success = await u.repositories.approvals.update_status(
-                approval_id, "denied", decided_by=decided_by, reason=reason
+                approval_id, "denied", decided_by=decided_by, reason=reason,
+                expected_status=expected_status,
             )
             if success:
                 request = await u.repositories.approvals.get(approval_id)

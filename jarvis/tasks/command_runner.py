@@ -17,6 +17,26 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
+# Windows CREATE_NEW_PROCESS_GROUP, so taskkill /T can target the child's tree.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _spawn_isolation_kwargs() -> dict[str, object]:
+    """Options that place the child in its own process group.
+
+    The child must never share the daemon's process group: termination signals the
+    whole group, and a shared group would take the daemon (or test runner) with it.
+    """
+    if _is_windows():
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+    # setsid() in the child: it becomes leader of a new session and process group
+    # whose id equals its pid.
+    return {"start_new_session": True}
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -90,10 +110,9 @@ class CommandRunner:
             process_env.pop(key, None)
 
         # 2. Start Process
-        # We use start_new_session=True (on Unix) or CREATE_NEW_PROCESS_GROUP (on Windows)
-        # to ensure we can kill the entire process tree.
-        # aiosqlite/asyncio handles OS differences mostly, but we use shell=False always.
-        
+        # The child gets its own session/process group (POSIX) or process group (Windows)
+        # so the entire child tree can be terminated without touching Jarvis itself.
+        # shell=False always.
         process = await asyncio.create_subprocess_exec(
             cmd,
             *args,
@@ -101,8 +120,7 @@ class CommandRunner:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd),
             env=process_env,
-            # Windows-specific: ensure we can terminate the process group
-            creationflags=0x00000200 if os.name == "nt" else 0, 
+            **_spawn_isolation_kwargs(),  # type: ignore[arg-type]
         )
 
         process_id = str(uuid.uuid4())
@@ -138,30 +156,33 @@ class CommandRunner:
                 
         except TimeoutError:
             timeout_occurred = True
-            if self._process_registry and task_id:
-                await self._process_registry.update_status(process_id, "timed_out")
             LOG.warning(f"Command '{cmd}' timed out after {timeout}s. Terminating process group.")
+            # Terminate first: a registry failure must never leave the child running.
             self._terminate_process(process)
+            await self._safe_update_status(process_id, task_id, "timed_out")
             # Try to grab whatever was in the pipes
             try:
                 stdout_data, stderr_data = await asyncio.wait_for(process.communicate(), timeout=2.0)
             except Exception:
                 pass
         except asyncio.CancelledError:
-            if self._process_registry and task_id:
-                await self._process_registry.update_status(process_id, "terminated")
             LOG.warning(f"Command '{cmd}' cancelled. Terminating process group.")
             self._terminate_process(process)
+            await self._reap(process)
+            await self._safe_update_status(process_id, task_id, "terminated")
             raise
         except Exception as e:
-            if self._process_registry and task_id:
-                await self._process_registry.update_status(process_id, "terminated")
             LOG.exception(f"Unexpected error during command execution: {e}")
             self._terminate_process(process)
+            await self._reap(process)
+            await self._safe_update_status(process_id, task_id, "terminated")
             raise
         finally:
             if self._process_registry and task_id:
-                await self._process_registry.unregister_process(process_id)
+                try:
+                    await self._process_registry.unregister_process(process_id)
+                except Exception as e:
+                    LOG.error(f"Failed to unregister process {process_id}: {e}")
 
         execution_time = time.perf_counter() - start_time
         
@@ -175,20 +196,53 @@ class CommandRunner:
             working_dir=str(cwd),
         )
 
-    def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        """Safely terminate a process and its children."""
+    async def _safe_update_status(self, process_id: str, task_id: str | None, status: str) -> None:
+        if not (self._process_registry and task_id):
+            return
         try:
-            if os.name == "nt":
-                # Windows process group termination
-                import subprocess
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
-            else:
-                # Unix process group termination
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            await self._process_registry.update_status(process_id, status)
         except Exception as e:
-            LOG.debug(f"Failed to kill process group {process.pid}: {e}")
-            # Fallback to single process kill
+            LOG.error(f"Failed to record process {process_id} as {status}: {e}")
+
+    @staticmethod
+    async def _reap(process: asyncio.subprocess.Process) -> None:
+        """Wait briefly for a killed child so it does not linger as a zombie."""
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except Exception:
+            pass
+
+    def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+        """Terminate the child and its descendants, never Jarvis's own process group.
+
+        Safe to call repeatedly and after the child has already exited.
+        """
+        if _is_windows():
+            if process.returncode is None:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True
+                )
+        else:
+            # The child was started with start_new_session=True, so its process group id
+            # equals its pid. Signal that group directly instead of looking it up: if the
+            # child has exited, getpgid() could fail or, worse, describe a different process.
+            pgid = process.pid
+            if pgid == os.getpgrp():
+                LOG.error(f"Refusing to kill process group {pgid}: it is Jarvis's own group.")
+            else:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Whole group already gone.
+                except Exception as e:
+                    LOG.debug(f"Failed to kill process group {pgid}: {e}")
+
+        # Fallback / belt-and-braces for the direct child.
+        if process.returncode is None:
             try:
                 process.kill()
-            except Exception:
+            except ProcessLookupError:
                 pass
+            except Exception as e:
+                LOG.debug(f"Failed to kill process {process.pid}: {e}")

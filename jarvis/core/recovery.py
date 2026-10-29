@@ -39,9 +39,16 @@ class SystemRecoveryService:
         LOG.info("System recovery sequence completed.")
 
     async def _recover_tasks(self, terminated_task_ids: list[str]) -> None:
-        """Recover tasks from interrupted states (e.g. after daemon crash)."""
+        """Recover tasks from interrupted states (e.g. after daemon crash).
+
+        Only tasks that were actively planning or running are touched; terminal, paused
+        and approval-waiting tasks keep their state. Running again is idempotent: a
+        recovered task is 'interrupted' and no longer matches the selection.
+        """
+        recovered: list[dict[str, object]] = []
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
+            assert unit.connection is not None
             
             # Find tasks that were active when the daemon crashed
             cursor = await unit.connection.execute(
@@ -66,6 +73,17 @@ class SystemRecoveryService:
                     "recovered_at": now,
                     "orphan_process_terminated": orphan_terminated
                 }
+
+                # A step left 'running' did not finish; never present it as in progress or
+                # successful. Its approval (if any) was consumed when it started, so
+                # resuming requires fresh approval before it can run again.
+                await unit.repositories.tasks.fail_running_steps(
+                    task_id,
+                    error=(
+                        "Interrupted by daemon restart while running; "
+                        "the action may have partially completed."
+                    ),
+                )
                 
                 # Update task status and metadata
                 await unit.repositories.tasks.update(
@@ -82,14 +100,9 @@ class SystemRecoveryService:
                     message=f"Task recovered after daemon restart and marked as {new_status}.",
                     payload=recovery_metadata
                 )
-                
-                # Publish event via EventBus
-                await self._event_bus.publish(
-                    "task.recovered",
-                    {
-                        "task_id": task_id,
-                        **recovery_metadata
-                    }
-                )
-                
+                recovered.append({"task_id": task_id, **recovery_metadata})
                 LOG.info(f"Recovered task {task_id}: transitioned from {previous_status} to {new_status}.")
+
+        # Publish only after the recovery transaction has committed.
+        for payload in recovered:
+            await self._event_bus.publish("task.recovered", payload)
