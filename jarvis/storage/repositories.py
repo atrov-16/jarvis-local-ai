@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import aiosqlite
@@ -713,6 +714,27 @@ class TaskRepository:
         )
         return cursor.rowcount > 0
 
+    async def transition(
+        self, task_id: str, to_status: str, *, from_statuses: tuple[str, ...], **kwargs: object
+    ) -> bool:
+        """Atomically move a task to `to_status` only if it is currently in `from_statuses`.
+
+        Returns False (and changes nothing) when the task is missing or in another state,
+        so concurrent transitions (e.g. a user cancel) are never overwritten.
+        """
+        allowed_keys = {
+            "title", "priority", "metadata_json", "started_at", "completed_at", "claimed_at"
+        }
+        fields = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        set_clause = "".join(f", {k} = ?" for k in fields)
+        placeholders = ",".join("?" * len(from_statuses))
+        cursor = await self._connection.execute(
+            f"UPDATE tasks SET status = ?{set_clause}, updated_at = ? "
+            f"WHERE id = ? AND status IN ({placeholders})",
+            (to_status, *fields.values(), _now(), task_id, *from_statuses),
+        )
+        return cursor.rowcount > 0
+
     async def insert_step(
         self,
         *,
@@ -783,6 +805,30 @@ class TaskRepository:
             tuple(values),
         )
         return cursor.rowcount > 0
+
+    async def transition_step(
+        self, step_id: str, to_status: str, *, from_statuses: tuple[str, ...], **kwargs: object
+    ) -> bool:
+        """Atomically move a step to `to_status` only if it is currently in `from_statuses`."""
+        allowed_keys = {"output_json", "error", "attempt_count"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        set_clause = "".join(f", {k} = ?" for k in fields)
+        placeholders = ",".join("?" * len(from_statuses))
+        cursor = await self._connection.execute(
+            f"UPDATE task_steps SET status = ?{set_clause}, updated_at = ? "
+            f"WHERE id = ? AND status IN ({placeholders})",
+            (to_status, *fields.values(), _now(), step_id, *from_statuses),
+        )
+        return cursor.rowcount > 0
+
+    async def fail_running_steps(self, task_id: str, error: str) -> int:
+        """Mark every step of the task still in 'running' as failed. Returns the count."""
+        cursor = await self._connection.execute(
+            "UPDATE task_steps SET status = 'failed', error = ?, updated_at = ? "
+            "WHERE task_id = ? AND status = 'running'",
+            (error, _now(), task_id),
+        )
+        return cursor.rowcount
 
     async def insert_event(
         self,
@@ -927,16 +973,72 @@ class ApprovalRepository:
         status: str,
         decided_by: str | None = None,
         reason: str | None = None,
+        expected_status: str | None = None,
     ) -> bool:
+        """Record a decision; with `expected_status`, only if the request is still in it."""
+        sql = """
+            UPDATE approval_requests
+            SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ?
+            WHERE id = ?
+            """
+        params: list[object] = [status, _now(), decided_by, reason, approval_id]
+        if expected_status is not None:
+            sql += " AND status = ?"
+            params.append(expected_status)
+        cursor = await self._connection.execute(sql, tuple(params))
+        return cursor.rowcount > 0
+
+    async def get_latest_for_step(
+        self, task_id: str, step_id: str, action_type: str = "tool"
+    ) -> dict[str, Any] | None:
+        """Most recent approval request bound to this exact task and step."""
         cursor = await self._connection.execute(
             """
-            UPDATE approval_requests 
-            SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ? 
-            WHERE id = ?
+            SELECT * FROM approval_requests
+            WHERE task_id = ? AND step_id = ? AND action_type = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
-            (status, _now(), decided_by, reason, approval_id),
+            (task_id, step_id, action_type),
         )
-        return cursor.rowcount > 0
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_latest_for_task(self, task_id: str, action_type: str) -> dict[str, Any] | None:
+        """Most recent approval request of `action_type` for the task (e.g. its plan)."""
+        cursor = await self._connection.execute(
+            """
+            SELECT * FROM approval_requests
+            WHERE task_id = ? AND action_type = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """,
+            (task_id, action_type),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def is_consumed(self, approval_id: str) -> bool:
+        """An approval is consumed once a step execution has started under it.
+
+        The task queue records that start as a 'step_started' event correlated with the
+        approval id, written in the same transaction that marks the step running.
+        """
+        cursor = await self._connection.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE event_type = 'step_started' AND correlation_id = ? LIMIT 1",
+            (approval_id,),
+        )
+        return await cursor.fetchone() is not None
+
+    async def cancel_pending_for_task(self, task_id: str, reason: str | None = None) -> int:
+        cursor = await self._connection.execute(
+            """
+            UPDATE approval_requests
+            SET status = 'cancelled', decided_at = ?, decided_by = 'system', decision_reason = ?
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (_now(), reason, task_id),
+        )
+        return cursor.rowcount
 
 
 class ProcessRegistryRepository:
