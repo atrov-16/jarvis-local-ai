@@ -21,6 +21,7 @@ from jarvis.memory.store import MemoryStore
 from jarvis.models.providers import (
     AuthenticationError,
     InsufficientCreditsError,
+    MissingCredentialsError,
     RetryableProviderError,
 )
 from jarvis.models.schemas import Message, ModelResponse
@@ -56,14 +57,15 @@ def _service(router: AsyncMock) -> ReflectionService:
     "outcome",
     [
         InsufficientCreditsError("OpenRouter refused the request (HTTP 402)"),
-        AuthenticationError("OpenRouter API key is missing."),
+        AuthenticationError("OpenRouter authentication failed: invalid key"),
+        MissingCredentialsError("OpenRouter API key is missing."),
         ModelResponse(
             message=Message(role="assistant", content="not json"),
             provider_name="t",
             model_used="t",
         ),
     ],
-    ids=["402", "auth", "unparsable-output"],
+    ids=["402", "auth", "missing-key", "unparsable-output"],
 )
 async def test_non_retryable_failures_make_exactly_one_attempt(outcome, sleeps) -> None:
     router = AsyncMock()

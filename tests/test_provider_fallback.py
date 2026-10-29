@@ -17,6 +17,7 @@ from jarvis.models.openrouter import MAX_ERROR_DETAIL_CHARS, OpenRouterProvider
 from jarvis.models.providers import (
     AuthenticationError,
     InsufficientCreditsError,
+    MissingCredentialsError,
     ModelProviderError,
     RetryableProviderError,
 )
@@ -316,3 +317,122 @@ async def test_malformed_ollama_response_is_a_provider_error(transport) -> None:
     transport["handler"] = lambda request: httpx.Response(200, json={"message": None})
     with pytest.raises(ModelProviderError, match="parsing failed"):
         await OllamaProvider().complete(_request())
+
+
+# --- Missing OpenRouter key ------------------------------------------------------------
+
+
+MISSING_KEY = MissingCredentialsError("OpenRouter API key is missing (set OPENROUTER_API_KEY).")
+
+
+async def test_missing_key_falls_back_to_working_ollama_once() -> None:
+    router = _router()
+    primary = _spy(FakeProvider("openrouter", raise_on_complete=MISSING_KEY))
+    fallback = _spy(FakeProvider("ollama"))
+    router._providers = {"openrouter": primary, "ollama": fallback}
+
+    response = await router.complete(_request())
+
+    assert response.provider_name == "ollama"
+    primary.complete.assert_awaited_once()
+    fallback.complete.assert_awaited_once()
+
+
+async def test_missing_key_with_ollama_down_is_a_clear_retryable_error() -> None:
+    router = _router()
+    down = RetryableProviderError("Ollama connection error: [Errno 61] Connection refused")
+    router._providers = {
+        "openrouter": FakeProvider("openrouter", raise_on_complete=MISSING_KEY),
+        "ollama": FakeProvider("ollama", raise_on_complete=down),
+    }
+    with pytest.raises(RetryableProviderError) as excinfo:
+        await router.complete(_request())
+
+    # Ollama is the only usable provider, so its transient failure stays retryable...
+    assert excinfo.value.__cause__ is down
+    # ...and the message still names the root cause.
+    message = str(excinfo.value)
+    assert "OPENROUTER_API_KEY" in message
+    assert "Fallback provider 'ollama' also failed" in message
+    assert "Connection refused" in message
+
+
+async def test_missing_key_with_failing_fallback_is_a_clear_credentials_error() -> None:
+    router = _router()
+    broken = ModelProviderError("Ollama unexpected status 404: model 'llama3.1' not found")
+    router._providers = {
+        "openrouter": FakeProvider("openrouter", raise_on_complete=MISSING_KEY),
+        "ollama": FakeProvider("ollama", raise_on_complete=broken),
+    }
+    with pytest.raises(MissingCredentialsError) as excinfo:
+        await router.complete(_request())
+
+    message = str(excinfo.value)
+    assert "OPENROUTER_API_KEY" in message and "model 'llama3.1' not found" in message
+    assert isinstance(excinfo.value, AuthenticationError)  # existing callers keep working
+
+
+async def test_missing_key_fallback_is_logged_without_a_warning(caplog) -> None:
+    import logging
+
+    router = _router()
+    router._providers = {
+        "openrouter": FakeProvider("openrouter", raise_on_complete=MISSING_KEY),
+        "ollama": FakeProvider("ollama"),
+    }
+    with caplog.at_level(logging.INFO, logger="jarvis.models.router"):
+        await router.complete(_request())
+    assert [r.levelname for r in caplog.records] == ["INFO"]
+    assert "is not configured; using 'ollama'" in caplog.text
+
+
+async def test_missing_key_without_fallback_is_raised_unchanged() -> None:
+    router = _router(fallback_provider="")
+    router._providers = {
+        "openrouter": FakeProvider("openrouter", raise_on_complete=MISSING_KEY),
+        "ollama": _spy(FakeProvider("ollama")),
+    }
+    with pytest.raises(MissingCredentialsError) as excinfo:
+        await router.complete(_request())
+    assert excinfo.value is MISSING_KEY
+    router._providers["ollama"].complete.assert_not_called()
+
+
+async def test_rejected_key_still_does_not_fall_back() -> None:
+    router = _router()
+    rejected = AuthenticationError("OpenRouter authentication failed: invalid key")
+    fallback = _spy(FakeProvider("ollama"))
+    router._providers = {
+        "openrouter": FakeProvider("openrouter", raise_on_complete=rejected),
+        "ollama": fallback,
+    }
+    with pytest.raises(AuthenticationError) as excinfo:
+        await router.complete(_request())
+    assert excinfo.value is rejected
+    fallback.complete.assert_not_called()
+
+
+async def test_end_to_end_missing_key_uses_local_ollama(transport) -> None:
+    transport["handler"] = _ollama_reply
+    config = JarvisConfig(models=ModelsConfig(primary_provider="openrouter"))
+    router = ModelRouter(config, SecretManager({}, use_keyring=False))
+
+    response = await router.complete(_request())
+
+    assert response.provider_name == "ollama"
+    hosts = [r.url.host for r in transport["requests"]]  # type: ignore[attr-defined]
+    assert hosts == ["localhost"]  # OpenRouter is never contacted without a key
+
+
+async def test_end_to_end_missing_key_and_ollama_not_running(transport) -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 61] Connection refused")
+
+    transport["handler"] = refuse
+    config = JarvisConfig(models=ModelsConfig(primary_provider="openrouter"))
+    router = ModelRouter(config, SecretManager({}, use_keyring=False))
+
+    with pytest.raises(RetryableProviderError) as excinfo:
+        await router.complete(_request())
+    assert "OpenRouter API key is missing" in str(excinfo.value)
+    assert "Ollama connection error" in str(excinfo.value)

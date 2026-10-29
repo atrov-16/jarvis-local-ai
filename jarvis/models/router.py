@@ -11,6 +11,7 @@ from jarvis.models.openrouter import OpenRouterProvider
 from jarvis.models.providers import (
     AuthenticationError,
     InsufficientCreditsError,
+    MissingCredentialsError,
     ModelProvider,
     ModelProviderError,
     RetryableProviderError,
@@ -43,6 +44,10 @@ class ModelRouter:
 
         try:
             return await primary.complete(request)
+        except (MissingCredentialsError, InsufficientCreditsError) as e:
+            # The primary cannot serve this request at all (no key / no credits) and retrying
+            # it would not help, but a configured (local) fallback can.
+            return await self._complete_with_fallback(primary_name, request, e)
         except (AuthenticationError, UnsupportedFeatureError):
             # Do not fallback for configuration or feature errors
             raise
@@ -52,28 +57,44 @@ class ModelRouter:
                 raise
             self._log_fallback(primary_name, fallback, e)
             return await fallback.complete(request)
-        except InsufficientCreditsError as e:
-            # Not retryable against the primary, but a (local) fallback can serve it.
-            # Either way the fallback fails, keep the root cause: the request is unpaid.
-            fallback_name = self._config.models.fallback_provider
-            try:
-                fallback = self._get_fallback(primary_name)
-            except ModelProviderError as lookup_error:  # e.g. a misspelled fallback_provider
-                raise InsufficientCreditsError(
-                    f"{e} Fallback provider '{fallback_name}' is not available: {lookup_error}"
-                ) from lookup_error
-            if fallback is None:
-                raise
-            self._log_fallback(primary_name, fallback, e)
-            try:
-                return await fallback.complete(request)
-            except ModelProviderError as fallback_error:
-                raise InsufficientCreditsError(
-                    f"{e} Fallback provider '{fallback_name}' also failed: {fallback_error}"
-                ) from fallback_error
         except ModelProviderError:
             # Other non-retryable provider errors
             raise
+
+    async def _complete_with_fallback(
+        self,
+        primary_name: str,
+        request: ModelRequest,
+        error: MissingCredentialsError | InsufficientCreditsError,
+    ) -> ModelResponse:
+        """One attempt on the fallback. Without a fallback, `error` is raised unchanged; if
+        the fallback fails, the error carries both causes, so the root cause (no key, no
+        credits) stays visible."""
+        fallback_name = self._config.models.fallback_provider
+        try:
+            fallback = self._get_fallback(primary_name)
+        except ModelProviderError as lookup_error:  # e.g. a misspelled fallback_provider
+            raise type(error)(
+                f"{error} Fallback provider '{fallback_name}' is not available: {lookup_error}"
+            ) from lookup_error
+        if fallback is None:
+            raise error
+        if isinstance(error, MissingCredentialsError):
+            # Expected in an Ollama-only setup: not worth a warning on every request.
+            LOG.info(f"Provider '{primary_name}' is not configured; using '{fallback.name}'.")
+        else:
+            self._log_fallback(primary_name, fallback, error)
+        try:
+            return await fallback.complete(request)
+        except ModelProviderError as fallback_error:
+            message = f"{error} Fallback provider '{fallback_name}' also failed: {fallback_error}"
+            if isinstance(error, MissingCredentialsError) and isinstance(
+                fallback_error, RetryableProviderError
+            ):
+                # The fallback is the only usable provider, so its transient failure stays
+                # retryable (e.g. reflection retries an Ollama timeout).
+                raise RetryableProviderError(message) from fallback_error
+            raise type(error)(message) from fallback_error
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelChunk]:
         # Minimal implementation as requested

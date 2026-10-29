@@ -185,6 +185,7 @@ def test_unexpected_errors_are_not_disguised(env) -> None:
     quiet = TestClient(client.app, raise_server_exceptions=False)
     response = quiet.get(f"/v1/tasks/{task_id}/summary", headers=HEADERS)
     assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
     assert "internal detail" not in response.text
     assert API_TOKEN not in response.text
 

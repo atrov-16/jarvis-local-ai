@@ -243,9 +243,11 @@ database is upgraded in place on the next start, wherever it lives.
 ## Model providers
 
 Requests go to `primary_provider` (default `openrouter`). After a transient failure (timeout,
-rate limit, 5xx) or HTTP 402 (insufficient OpenRouter credits), the request is sent once to
-`fallback_provider` (default `ollama`, at `http://localhost:11434`); set `fallback_provider = ""`
-in `[models]` to disable the fallback. Authentication errors do not fall back. Background
+rate limit, 5xx), HTTP 402 (insufficient OpenRouter credits), or when no OpenRouter API key is
+configured, the request is sent once to `fallback_provider` (default `ollama`, at
+`http://localhost:11434`), so an Ollama-only setup works without changing `primary_provider`;
+set `fallback_provider = ""` in `[models]` to disable the fallback. A key that OpenRouter
+rejects (401/403) does not fall back, so the misconfiguration is reported. Background
 reflection requests at most `reflection_max_tokens` output tokens (default 1024).
 
 ---
@@ -297,6 +299,21 @@ High-risk actions such as:
 require explicit approval before execution.
 
 Filesystem operations are restricted to approved project workspaces.
+
+The API is local-only. With `localhost_only = true` (the default, in `[security]`):
+
+- the daemon refuses to start unless `server.host` is a loopback address (`127.0.0.1`,
+  `::1` or `localhost`);
+- every HTTP request and WebSocket connection whose peer address is not loopback is
+  refused (HTTP 403), including `/health`. The TCP peer address is used; proxy headers such
+  as `X-Forwarded-For` are not trusted, so a reverse proxy in front of Jarvis is not supported.
+
+Setting `localhost_only = false` allows another bind address; the API token is still required
+for every `/v1/*` request, and the daemon refuses a non-loopback bind while
+`api_token_enabled = false`. All `/v1/*` HTTP requests need the token (`Authorization: Bearer`
+or `X-Jarvis-Api-Token`); the `/v1/events` WebSocket accepts it only in the
+`Authorization: Bearer <token>` header (not in the URL). Unexpected server errors return a
+generic `{"detail": "Internal server error."}`; details go to the daemon log only.
 
 ---
 

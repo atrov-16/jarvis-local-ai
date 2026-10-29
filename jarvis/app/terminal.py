@@ -33,7 +33,10 @@ console = Console()
 def _get_api_client(config_path: Path | None = None) -> httpx.Client:
     jarvis_config = load_config(config_path)
     secret_manager = SecretManager()
-    base_url = f"http://{jarvis_config.server.host}:{jarvis_config.server.port}"
+    host = jarvis_config.server.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"  # IPv6 literal, e.g. ::1
+    base_url = f"http://{host}:{jarvis_config.server.port}"
     token = secret_manager.get_api_token()
     headers = {}
     if token:

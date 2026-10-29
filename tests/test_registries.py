@@ -60,11 +60,12 @@ async def test_project_registry_and_persistence(uow: UnitOfWork) -> None:
     assert await registry.get_current_id() is None
 
 
-async def test_workspace_registry_normalization_and_lookup(uow: UnitOfWork) -> None:
+async def test_workspace_registry_normalization_and_lookup(uow: UnitOfWork, tmp_path) -> None:
     registry = WorkspaceRegistry(uow)
     
-    # Path normalization
-    w_id = await registry.add("W1", "C:\\temp\\..\\workspace")
+    # Path normalization (a real path on this platform: "C:\\..." is one relative file name on
+    # POSIX, where ".." inside it cannot be normalized away)
+    w_id = await registry.add("W1", str(tmp_path / "temp" / ".." / "workspace"))
     workspaces = await registry.list()
     
     assert len(workspaces) == 1
@@ -75,11 +76,11 @@ async def test_workspace_registry_normalization_and_lookup(uow: UnitOfWork) -> N
     
     # Duplicate registration of same normalized path should fail
     with pytest.raises(ValueError, match="already registered"):
-        await registry.add("W2", "C:\\workspace")
+        await registry.add("W2", str(tmp_path / "workspace"))
 
     # Lookups
     assert (await registry.get(w_id))["name"] == "W1"
-    assert (await registry.get_by_path("C:\\workspace"))["id"] == w_id
+    assert (await registry.get_by_path(str(tmp_path / "workspace")))["id"] == w_id
     
     # Update
     assert await registry.update(w_id, enabled=False, name="New Name") is True

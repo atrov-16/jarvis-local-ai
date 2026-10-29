@@ -16,6 +16,15 @@ class AuthenticationError(ModelProviderError):
     pass
 
 
+class MissingCredentialsError(AuthenticationError):
+    """Raised when no API key is configured at all (as opposed to a rejected key).
+
+    Unlike a rejected key (401/403), it is not a mistake to report but a provider that is
+    simply not set up, so the router may serve the request with a configured fallback.
+    """
+    pass
+
+
 class RetryableProviderError(ModelProviderError):
     """Raised for timeouts, 502 Bad Gateway, 429 Rate Limits, or connection drops."""
     pass
