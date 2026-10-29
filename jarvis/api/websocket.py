@@ -19,11 +19,11 @@ async def authenticate_websocket(
         return True
 
     expected = secret_manager.get_api_token()
-    # The query parameter is kept for compatibility; the log redaction filter strips it from
-    # uvicorn's request logs. Prefer the Authorization header.
-    supplied = websocket.query_params.get("token")
+    # Authorization header only: a token in the URL (?token=) would end up in request logs,
+    # proxy logs and browser history, so it is not accepted.
+    supplied = None
     authorization = websocket.headers.get("authorization")
-    if supplied is None and authorization is not None and authorization.startswith("Bearer "):
+    if authorization is not None and authorization.startswith("Bearer "):
         supplied = authorization[len("Bearer ") :]
 
     if not tokens_match(supplied, expected):

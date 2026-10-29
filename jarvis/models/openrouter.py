@@ -11,6 +11,7 @@ from jarvis.logging.redaction import redact_sensitive
 from jarvis.models.providers import (
     AuthenticationError,
     InsufficientCreditsError,
+    MissingCredentialsError,
     ModelProvider,
     ModelProviderError,
     RetryableProviderError,
@@ -116,7 +117,10 @@ class OpenRouterProvider(ModelProvider):
     def _get_api_key(self) -> str:
         api_key = self._secret_manager.get_openrouter_api_key()
         if not api_key:
-            raise AuthenticationError("OpenRouter API key is missing.")
+            raise MissingCredentialsError(
+                "OpenRouter API key is missing (set OPENROUTER_API_KEY, or store it in the OS "
+                "credential store as service 'Jarvis', account 'OpenRouter')."
+            )
         return api_key
 
     def _build_payload(self, request: ModelRequest) -> dict[str, object]:

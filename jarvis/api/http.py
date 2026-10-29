@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -47,6 +48,7 @@ from jarvis.api.schemas import (
 from jarvis.api.services.approval_center import ApprovalCenterService
 from jarvis.api.services.memory_browser import MemoryBrowserService
 from jarvis.api.services.trace import TaskNotFoundError, TraceService
+from jarvis.api.network import LocalhostOnlyMiddleware
 from jarvis.api.websocket import authenticate_websocket
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.config.manager import load_config
@@ -181,6 +183,9 @@ def create_app(
         await task_queue.stop()
 
     app = FastAPI(title="Jarvis", version=__version__, lifespan=lifespan)
+    if jarvis_config.security.localhost_only:
+        app.add_middleware(LocalhostOnlyMiddleware)
+    app.add_exception_handler(Exception, _internal_server_error)
     app.state.config = jarvis_config
     app.state.secret_manager = secrets
     app.state.event_bus = bus
@@ -304,8 +309,12 @@ def create_app(
         try:
             await projects.link_workspace(project_id, workspace_id)
             return JSONResponse({"linked": True})
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except sqlite3.IntegrityError:
+            # Unknown project or workspace (foreign key), or an existing link (primary key).
+            raise HTTPException(
+                status_code=400,
+                detail="Project or workspace not found, or the workspace is already linked.",
+            ) from None
 
     @app.delete("/v1/projects/{project_id}/workspaces/{workspace_id}")
     async def unlink_workspace(
@@ -581,12 +590,11 @@ def create_app(
 
     @app.get("/v1/tasks/{task_id}/trace", response_model=TaskTraceResponse)
     async def get_task_trace(task_id: str, include_system: bool = False, _: None = Depends(require_api_token)) -> TaskTraceResponse:
+        # Unexpected errors (including corrupt stored JSON) reach _internal_server_error.
         try:
             return await trace_service.get_task_trace(task_id, include_system=include_system)
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except TaskNotFoundError:
+            raise HTTPException(status_code=404, detail="Task not found.") from None
 
     @app.get("/v1/tasks/{task_id}/summary", response_model=TaskSummaryResponse)
     async def get_task_summary(
@@ -881,6 +889,15 @@ async def require_api_token(
     supplied = _extract_token(authorization, x_jarvis_api_token)
     if not tokens_match(supplied, expected):
         raise HTTPException(status_code=401, detail="Valid local API token required.")
+
+
+async def _internal_server_error(request: Request, exc: Exception) -> JSONResponse:
+    """Generic body for unhandled errors: exception text can carry internal details.
+
+    The server still logs the full traceback (through the redaction filter).
+    """
+    LOG.error(f"Unhandled {type(exc).__name__} in {request.method} {request.url.path}")
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
 
 
 def _provision_api_token(secret_manager: SecretManager) -> None:

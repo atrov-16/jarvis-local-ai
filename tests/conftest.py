@@ -9,6 +9,10 @@
   exactly afterwards.
 - The per-user data directory and the repository-root legacy database location resolve to
   temporary directories, so a default-configured app never opens the real database.
+- httpx.AsyncClient has no network by default: model providers (e.g. a local Ollama the app
+  falls back to) are never contacted for real. Tests that need responses patch the client or
+  pass a mock transport.
+- TestClient connects from 127.0.0.1 by default, a loopback peer for localhost_only.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
@@ -35,6 +40,21 @@ ISOLATED_ENV_VARS = (
     "JARVIS_SERVER_HOST",
     "JARVIS_SERVER_PORT",
 )
+
+
+class _NoNetworkTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            f"network access is disabled in tests: {request.url}", request=request
+        )
+
+
+class OfflineAsyncClient(httpx.AsyncClient):
+    """httpx.AsyncClient whose default transport refuses every connection."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("transport", _NoNetworkTransport())
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
 
 
 class IsolatedTestKeyring(KeyringBackend):
@@ -82,6 +102,17 @@ def isolated_host_state(
     monkeypatch.setattr(paths, "user_data_dir", lambda *args, **kwargs: str(data_dir / "Jarvis"))
     source_root = tmp_path_factory.mktemp("source-root")
     monkeypatch.setattr(paths, "source_root", lambda: Path(source_root))
+
+    monkeypatch.setattr(httpx, "AsyncClient", OfflineAsyncClient)
+
+    from starlette import testclient
+
+    original_init = testclient.TestClient.__init__
+
+    def loopback_init(self, *args, client=("127.0.0.1", 50000), **kwargs):  # type: ignore[no-untyped-def]
+        original_init(self, *args, client=client, **kwargs)
+
+    monkeypatch.setattr(testclient.TestClient, "__init__", loopback_init)
 
     yield TEST_KEYRING
     TEST_KEYRING.passwords.clear()

@@ -136,7 +136,7 @@ def test_configured_token_is_not_logged_during_requests(tmp_path, raw_log) -> No
         headers = {"Authorization": f"Bearer {DUMMY_API_TOKEN}"}
         assert client.get("/v1/projects", headers=headers).status_code == 200
         assert client.get("/v1/config/public", headers=headers).status_code == 200
-        # A query-string token that does not match is rejected (the route closes at once).
+        # Query-string tokens are not accepted at all (the route closes at once).
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect(f"/v1/events?token={DUMMY_API_TOKEN}-wrong"):
                 pass
