@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jarvis.core.reflection import ReflectionService
+from jarvis.core.reflection import DEFAULT_REFLECTION_MAX_TOKENS, ReflectionService
 from jarvis.memory.store import MemoryStore
 from jarvis.models.schemas import Message, ModelResponse
 from jarvis.storage.unit_of_work import UnitOfWork
@@ -132,5 +132,5 @@ async def test_reflect_on_task_creates_proposals(mock_uow, mock_model_router, mo
     # Verify max_tokens
     mock_model_router.complete.assert_called_once()
     req = mock_model_router.complete.call_args[0][0]
-    assert req.max_tokens == 4096
+    assert req.max_tokens == DEFAULT_REFLECTION_MAX_TOKENS == 1024
     assert "engine" in args["metadata"]

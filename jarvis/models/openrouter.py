@@ -4,10 +4,13 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from pydantic import ValidationError
 
 from jarvis.config.secrets import SecretManager
+from jarvis.logging.redaction import redact_sensitive
 from jarvis.models.providers import (
     AuthenticationError,
+    InsufficientCreditsError,
     ModelProvider,
     ModelProviderError,
     RetryableProviderError,
@@ -20,6 +23,9 @@ from jarvis.models.schemas import (
     ProviderStatus,
     Usage,
 )
+
+# Error bodies are kept for diagnostics, but bounded: some gateways return whole HTML pages.
+MAX_ERROR_DETAIL_CHARS = 1000
 
 
 class OpenRouterProvider(ModelProvider):
@@ -57,14 +63,18 @@ class OpenRouterProvider(ModelProvider):
                     json=payload,
                     timeout=60.0,
                 )
-                self._handle_http_errors(response)
+                self._handle_http_errors(response, api_key)
                 
                 data = response.json()
                 return self._parse_response(data)
             except httpx.TimeoutException as e:
-                raise RetryableProviderError(f"OpenRouter timeout: {e}") from e
+                raise RetryableProviderError(
+                    f"OpenRouter timeout: {self._sanitize(str(e), api_key)}"
+                ) from e
             except httpx.RequestError as e:
-                raise RetryableProviderError(f"OpenRouter connection error: {e}") from e
+                raise RetryableProviderError(
+                    f"OpenRouter connection error: {self._sanitize(str(e), api_key)}"
+                ) from e
             except json.JSONDecodeError as e:
                 raise ModelProviderError(f"OpenRouter invalid JSON response: {e}") from e
 
@@ -99,7 +109,9 @@ class OpenRouterProvider(ModelProvider):
                     error=f"OpenRouter returned status {response.status_code}"
                 )
             except Exception as e:
-                return ProviderStatus(name=self.name, available=False, error=str(e))
+                return ProviderStatus(
+                    name=self.name, available=False, error=self._sanitize(str(e), api_key)
+                )
 
     def _get_api_key(self) -> str:
         api_key = self._secret_manager.get_openrouter_api_key()
@@ -153,18 +165,28 @@ class OpenRouterProvider(ModelProvider):
                 provider_name=self.name,
                 model_used=str(data.get("model", "")),
             )
-        except (KeyError, IndexError, TypeError) as e:
+        except (KeyError, IndexError, TypeError, AttributeError, ValidationError) as e:
             raise ModelProviderError(f"OpenRouter response parsing failed: {e}") from e
 
-    def _handle_http_errors(self, response: httpx.Response) -> None:
+    def _handle_http_errors(self, response: httpx.Response, api_key: str) -> None:
         if response.status_code == 200:
             return
-            
+
+        detail = self._sanitize(response.text[:MAX_ERROR_DETAIL_CHARS], api_key)
         if response.status_code in (401, 403):
-            raise AuthenticationError(f"OpenRouter authentication failed: {response.text}")
+            raise AuthenticationError(f"OpenRouter authentication failed: {detail}")
+        if response.status_code == 402:
+            raise InsufficientCreditsError(
+                f"OpenRouter refused the request for insufficient credits (HTTP 402): {detail}"
+            )
         if response.status_code == 429:
-            raise RetryableProviderError(f"OpenRouter rate limit exceeded: {response.text}")
+            raise RetryableProviderError(f"OpenRouter rate limit exceeded: {detail}")
         if response.status_code >= 500:
-            raise RetryableProviderError(f"OpenRouter server error: {response.text}")
-        
-        raise ModelProviderError(f"OpenRouter unexpected status {response.status_code}: {response.text}")
+            raise RetryableProviderError(f"OpenRouter server error: {detail}")
+
+        raise ModelProviderError(f"OpenRouter unexpected status {response.status_code}: {detail}")
+
+    @staticmethod
+    def _sanitize(text: str, api_key: str) -> str:
+        """Provider messages end up in logs, task events and API responses: strip the key."""
+        return redact_sensitive(text, [api_key])

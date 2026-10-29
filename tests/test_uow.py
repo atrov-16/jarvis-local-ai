@@ -27,13 +27,17 @@ async def test_unit_of_work_does_not_run_migrations(mock_repos: MagicMock, mock_
 
 
 @patch("jarvis.api.http.run_migrations", new_callable=AsyncMock)
-def test_app_startup_runs_migrations(mock_run_migrations: AsyncMock, tmp_path: Path) -> None:
+def test_app_startup_runs_migrations(
+    mock_run_migrations: AsyncMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Verify that the FastAPI lifespan correctly executes migrations exactly once at startup."""
-    import os
-    
-    # We need to set the JARVIS_DB_PATH so lifespan uses a dummy path
+    from jarvis.config.secrets import SecretManager
+
+    # A disposable database, through the variable config actually reads (restored afterwards),
+    # and a working directory where a stray default database would be noticed.
     db_path = tmp_path / "test.sqlite"
-    os.environ["JARVIS_DB_PATH"] = str(db_path)
+    monkeypatch.setenv("JARVIS_DATABASE_PATH", str(db_path))
+    monkeypatch.chdir(tmp_path)
     
     # Mock services that start in lifespan
     with patch("jarvis.api.http.SystemRecoveryService") as mock_sys_rec, \
@@ -46,15 +50,18 @@ def test_app_startup_runs_migrations(mock_run_migrations: AsyncMock, tmp_path: P
         mock_ref.return_value.start = AsyncMock()
         mock_ref.return_value.stop = AsyncMock()
          
-        # create_app needs the config and secrets but for tests we mock or let it use defaults
-        app = create_app()
+        # Injected credentials: startup must not read or write the OS credential store.
+        app = create_app(
+            secret_manager=SecretManager({"JARVIS_API_TOKEN": "dummy-token"}, use_keyring=False)
+        )
          
         # TestClient triggers the lifespan events
-        with TestClient(app) as client:
+        with TestClient(app):
             # When the client enters the context manager, startup events (lifespan) are triggered
             pass
             
     # Verify migrations were run once
     mock_run_migrations.assert_awaited_once()
     assert "storage_status" in app.state._state
-    assert "database_path" in app.state.storage_status
+    assert app.state.storage_status["database_path"] == str(db_path)
+    assert not (tmp_path / ".jarvis").exists()

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
@@ -44,17 +46,26 @@ from jarvis.api.schemas import (
 )
 from jarvis.api.services.approval_center import ApprovalCenterService
 from jarvis.api.services.memory_browser import MemoryBrowserService
-from jarvis.api.services.trace import TraceService
+from jarvis.api.services.trace import TaskNotFoundError, TraceService
 from jarvis.api.websocket import authenticate_websocket
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.config.manager import load_config
+from jarvis.config import paths
 from jarvis.config.models import JarvisConfig
-from jarvis.config.secrets import SecretManager
+from jarvis.config.secrets import (
+    API_TOKEN_ACCOUNT,
+    API_TOKEN_ENV,
+    JARVIS_SERVICE,
+    SecretManager,
+    SecretStorageError,
+    tokens_match,
+)
 from jarvis.core.event_bus import EventBus
 from jarvis.core.orphan_recovery import OrphanRecoveryService
 from jarvis.core.process_registry import ProcessRegistryService
 from jarvis.core.recovery import SystemRecoveryService
 from jarvis.core.reflection import ReflectionService
+from jarvis.logging.redaction import register_log_secrets
 from jarvis.memory.store import MemoryStore
 from jarvis.models.router import ModelRouter
 from jarvis.projects.registry import ProjectRegistry
@@ -82,6 +93,7 @@ from jarvis.tools.tasks import GetTaskStatusTool
 from jarvis.tools.test_runner import TestTool
 from jarvis.workspaces.registry import WorkspaceRegistry
 
+LOG = logging.getLogger(__name__)
 
 # Task states from which a user may resume or cancel.
 RESUMABLE_TASK_STATUSES = ("paused", "failed", "interrupted")
@@ -109,7 +121,10 @@ def create_app(
     memory_store = MemoryStore(uow)
     model_router = ModelRouter(jarvis_config, secrets)
     approval_broker = ApprovalBroker(uow, bus)
-    reflection_service = ReflectionService(uow, bus, model_router, memory_store)
+    reflection_service = ReflectionService(
+        uow, bus, model_router, memory_store,
+        max_tokens=jarvis_config.models.reflection_max_tokens,
+    )
     trace_service = TraceService(uow, model_router)
     memory_browser = MemoryBrowserService(uow, memory_store)
     approval_center = ApprovalCenterService(uow, approval_broker, memory_store)
@@ -141,14 +156,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if jarvis_config.security.api_token_enabled and secrets.get_api_token() is None:
-            import secrets as std_secrets
-            import logging
-            new_token = std_secrets.token_urlsafe(32)
-            secrets.set_api_token(new_token)
-            logging.getLogger(__name__).warning(
-                f"\n{'='*60}\nNo API token configured. Auto-generated new token and saved to keyring.\nToken: {new_token}\n{'='*60}"
-            )
+            _provision_api_token(secrets)
+        register_log_secrets(secrets.known_secret_values())
 
+        if database_path is None:
+            _check_configured_database(jarvis_config, db_path)
+        LOG.info(f"Using database {db_path}")
         async with sqlite_connection(db_path) as connection:
             applied = await run_migrations(connection)
         app.state.storage_status = {
@@ -176,6 +189,7 @@ def create_app(
     app.state.memory_store = memory_store
     app.state.model_router = model_router
     app.state.task_queue = task_queue
+    app.state.reflection_service = reflection_service
     app.state.approval_broker = approval_broker
 
     @app.get("/health", response_model=HealthResponse)
@@ -575,22 +589,16 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/v1/tasks/{task_id}/summary", response_model=TaskSummaryResponse)
-    async def get_task_summary(task_id: str, request: Request, _: None = Depends(require_api_token)) -> TaskSummaryResponse:
+    async def get_task_summary(
+        task_id: str, _: None = Depends(require_api_token)
+    ) -> TaskSummaryResponse:
+        # Unexpected errors propagate: logged with their traceback, a generic 500 to the client.
         try:
-            # Gather secrets for redaction
-            secrets = []
-            if hasattr(request.app.state, "secret_manager"):
-                all_secrets = await request.app.state.secret_manager.list_secrets()
-                for s in all_secrets:
-                    val = await request.app.state.secret_manager.get_secret(s["name"])
-                    if val:
-                        secrets.append(val)
-            
-            return await trace_service.get_task_summary(task_id, secrets=secrets)
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return await trace_service.get_task_summary(
+                task_id, secrets=secrets.known_secret_values()
+            )
+        except TaskNotFoundError:
+            raise HTTPException(status_code=404, detail="Task not found.") from None
 
     @app.post("/v1/tasks/{task_id}/plan/approve")
     async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
@@ -871,8 +879,47 @@ async def require_api_token(
     secret_manager: SecretManager = request.app.state.secret_manager
     expected = secret_manager.get_api_token()
     supplied = _extract_token(authorization, x_jarvis_api_token)
-    if expected is None or supplied != expected:
+    if not tokens_match(supplied, expected):
         raise HTTPException(status_code=401, detail="Valid local API token required.")
+
+
+def _provision_api_token(secret_manager: SecretManager) -> None:
+    """Generate the local API token on first start and store it in the OS credential store.
+
+    The value is never logged; the CLI reads it from the credential store.
+    """
+    token = token_urlsafe(32)
+    register_log_secrets([token])
+    try:
+        secret_manager.set_api_token(token)
+        # Some backends (e.g. keyring's null backend) accept writes and store nothing.
+        if not tokens_match(secret_manager.get_api_token(), token):
+            raise SecretStorageError("the stored token could not be read back")
+    except SecretStorageError as e:
+        # Without a stored token no client could authenticate; refuse to start.
+        raise SecretStorageError(
+            f"No API token is configured and a generated one could not be saved ({e}). "
+            f"Set {API_TOKEN_ENV} for both the daemon and the CLI (for example in .env), "
+            f"then restart."
+        ) from e
+    LOG.warning(
+        f"No API token was configured. Generated one and stored it in the OS credential store "
+        f"(service {JARVIS_SERVICE!r}, account {API_TOKEN_ACCOUNT!r}), where the CLI reads it. "
+        f"The token value is not logged."
+    )
+
+
+def _check_configured_database(config: JarvisConfig, db_path: Path) -> None:
+    """Startup checks for a database path that comes from configuration."""
+    configured = str(config.memory.database_path)
+    if not paths.expand_user_and_vars(configured).is_absolute():
+        LOG.warning(
+            f"memory.database_path {configured!r} is relative, so it depends on the working "
+            f"directory (resolved to {db_path}). Configure an absolute path."
+        )
+    # Only an unconfigured default can silently replace an earlier database.
+    if "database_path" not in config.memory.model_fields_set:
+        paths.check_default_database_location(db_path)
 
 
 def _extract_token(authorization: str | None, x_jarvis_api_token: str | None) -> str | None:

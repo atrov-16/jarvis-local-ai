@@ -9,10 +9,12 @@ from pathlib import Path
 import aiosqlite
 
 from jarvis.config.models import JarvisConfig
+from jarvis.config.paths import expand_path
 
 
 def resolve_database_path(config: JarvisConfig) -> Path:
-    return Path(config.memory.database_path)
+    """The absolute database path, so every component of the process opens the same file."""
+    return expand_path(config.memory.database_path)
 
 
 async def open_sqlite_connection(path: Path) -> aiosqlite.Connection:

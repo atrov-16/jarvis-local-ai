@@ -1,4 +1,3 @@
-import os
 
 import pytest
 
@@ -62,12 +61,12 @@ async def test_command_runner_timeout(runner, tmp_path):
     assert result.exit_code != 0
 
 @pytest.mark.asyncio
-async def test_command_runner_env_scrubbing(runner, tmp_path):
+async def test_command_runner_env_scrubbing(runner, tmp_path, monkeypatch):
     import sys
     python_exe = sys.executable
     
-    # Set a forbidden key in os.environ
-    os.environ["JARVIS_API_TOKEN"] = "secret-token"
+    # Set a forbidden key in os.environ (restored afterwards, so later tests never see it)
+    monkeypatch.setenv("JARVIS_API_TOKEN", "secret-token")
     
     result = await runner.run(
         python_exe, 

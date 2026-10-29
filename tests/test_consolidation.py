@@ -96,7 +96,7 @@ async def test_consolidate_all_creates_merge_proposals(mock_uow, mock_model_rout
     # Verify max_tokens
     mock_model_router.complete.assert_called_once()
     req = mock_model_router.complete.call_args[0][0]
-    assert req.max_tokens == 4096
+    assert req.max_tokens == 1024
 
 
 @pytest.mark.asyncio
