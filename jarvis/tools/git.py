@@ -10,6 +10,17 @@ from pydantic import BaseModel, Field
 
 from jarvis.tasks.command_runner import CommandRunner
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
+from jarvis.tools.path_policy import authorize_path, resolve_in_workspace
+
+# Global options for every invocation: a repository's own config (which a cloned,
+# untrusted project controls) must not be able to run programs during status/diff/log.
+GIT_SAFE_OPTIONS = [
+    "--no-pager",
+    "--no-optional-locks",
+    "-c", "core.fsmonitor=false",
+    "-c", "core.pager=cat",
+    "-c", "diff.external=",
+]
 
 
 class GitOperation(str, Enum):
@@ -55,11 +66,7 @@ class GitTool(BaseTool):
             # but we need a validated path to anchor the Git commands.
             target_path_str = kwargs.get("path") or "."
             
-            # Note: _get_validated_path is in filesystem.py, but we don't want circular imports.
-            # For now, we'll implement a simple version or move the helper.
-            # Given the constraints, I will use a local validation check.
-            from jarvis.tools.filesystem import _get_validated_path
-            cwd = _get_validated_path(".", workspaces)
+            cwd = resolve_in_workspace(".", workspaces).path
             
             if not (cwd / ".git").exists():
                 # Check parents if not at root
@@ -76,7 +83,12 @@ class GitTool(BaseTool):
             if operation == GitOperation.STATUS:
                 return await self._do_status(cwd, task_id)
             elif operation == GitOperation.DIFF:
-                return await self._do_diff(cwd, kwargs.get("path"), task_id)
+                diff_path = None
+                if kwargs.get("path"):
+                    # Must be inside the workspace and not protected; passed after `--` so
+                    # it can never be read as an option.
+                    diff_path = str(authorize_path(kwargs["path"], workspaces).path)
+                return await self._do_diff(cwd, diff_path, task_id)
             elif operation == GitOperation.LOG:
                 return await self._do_log(cwd, kwargs.get("limit", 5), task_id)
             else:
@@ -85,13 +97,16 @@ class GitTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, error=str(e))
 
+    async def _git(self, args: list[str], cwd: Path, task_id: str | None):
+        return await self._runner.run("git", [*GIT_SAFE_OPTIONS, *args], cwd=cwd, task_id=task_id)
+
     async def _do_status(self, cwd: Path, task_id: str | None = None) -> ToolResult:
         # Branch detection
-        branch_res = await self._runner.run("git", ["branch", "--show-current"], cwd=cwd, task_id=task_id)
+        branch_res = await self._git(["branch", "--show-current"], cwd, task_id)
         branch = branch_res.stdout.strip() or "DETACHED"
 
         # Porcelain status for counts
-        status_res = await self._runner.run("git", ["status", "--porcelain=v1"], cwd=cwd, task_id=task_id)
+        status_res = await self._git(["status", "--porcelain=v1"], cwd, task_id)
         lines = status_res.stdout.splitlines()
         
         modified = 0
@@ -119,11 +134,11 @@ class GitTool(BaseTool):
         return ToolResult(success=True, data=summary)
 
     async def _do_diff(self, cwd: Path, file_path: str | None, task_id: str | None = None) -> ToolResult:
-        args = ["diff", "--no-color", "--no-ext-diff"]
+        args = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
         if file_path:
-            args.append(file_path)
+            args.extend(["--", file_path])
             
-        res = await self._runner.run("git", args, cwd=cwd, task_id=task_id)
+        res = await self._git(args, cwd, task_id)
         
         if not res.stdout and not res.stderr and res.exit_code == 0:
             return ToolResult(success=True, data={"diff": "", "message": "No changes found."})
@@ -138,12 +153,7 @@ class GitTool(BaseTool):
 
     async def _do_log(self, cwd: Path, limit: int, task_id: str | None = None) -> ToolResult:
         limit = min(max(1, limit), 20)
-        res = await self._runner.run(
-            "git", 
-            ["log", f"-n{limit}", "--oneline", "--no-color"], 
-            cwd=cwd,
-            task_id=task_id
-        )
+        res = await self._git(["log", f"-n{limit}", "--oneline", "--no-color"], cwd, task_id)
         
         if res.exit_code != 0:
             return ToolResult(success=False, error=f"Git log failed: {res.stderr}")

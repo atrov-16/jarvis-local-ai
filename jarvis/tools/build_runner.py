@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 
 from jarvis.tasks.command_runner import CommandRunner
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
+from jarvis.tools.path_policy import resolve_in_workspace
+from jarvis.tools.test_runner import TIMEOUT_GRACE_SECONDS, find_project_python, reject_option_like
 
 LOG = logging.getLogger(__name__)
 
@@ -42,7 +44,8 @@ class BuildTool(BaseTool):
         super().__init__(
             name="build",
             description="Executes project build commands and verifies compilation.",
-            category=ToolCategory.MUTATING,
+            # Builds run project-controlled code (npm scripts, Makefiles, build.rs, setup.py).
+            category=ToolCategory.SYSTEM,
             timeout_seconds=300, # Slow builds (e.g. cargo)
         )
         self._runner = runner
@@ -50,11 +53,14 @@ class BuildTool(BaseTool):
     def get_input_schema(self) -> type[BaseModel]:
         return BuildToolInput
 
+    def execution_timeout(self, inputs: dict[str, Any]) -> float:
+        return self.timeout_seconds + TIMEOUT_GRACE_SECONDS
+
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            from jarvis.tools.filesystem import _get_validated_path
-            cwd = _get_validated_path(".", workspaces)
+            cwd = resolve_in_workspace(".", workspaces).path
+            reject_option_like("target", kwargs.get("target"))
             
             system = kwargs.get("system", BuildSystem.AUTO)
             if system == BuildSystem.AUTO:
@@ -66,7 +72,7 @@ class BuildTool(BaseTool):
             is_typescript = (cwd / "tsconfig.json").exists()
 
             # 2. Prepare Command
-            cmd, args = self._prepare_command(system, kwargs)
+            cmd, args = self._prepare_command(system, kwargs, find_project_python(cwd)[0])
             
             # 3. Run Command
             task_id = kwargs.get("task_id")
@@ -115,7 +121,9 @@ class BuildTool(BaseTool):
             return BuildSystem.MAKE
         return None
 
-    def _prepare_command(self, system: BuildSystem, inputs: dict) -> tuple[str, list[str]]:
+    def _prepare_command(
+        self, system: BuildSystem, inputs: dict, python_exe: str | None = None
+    ) -> tuple[str, list[str]]:
         target = inputs.get("target")
         mode = inputs.get("mode", "debug")
         
@@ -136,8 +144,8 @@ class BuildTool(BaseTool):
             return "cargo", args
             
         elif system == BuildSystem.PYTHON:
-            # python -m build
-            return sys.executable, ["-m", "build"]
+            # python -m build, with the project's own interpreter when it has a venv
+            return python_exe or sys.executable, ["-m", "build"]
             
         elif system == BuildSystem.MAKE:
             # make [target]

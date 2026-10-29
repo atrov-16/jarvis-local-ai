@@ -8,8 +8,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from jarvis.tasks.command_runner import CommandRunner
+from jarvis.tasks.command_runner import MAX_COMMAND_TIMEOUT, CommandRunner
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
+from jarvis.tools.path_policy import authorize_path, resolve_in_workspace
 
 LOG = logging.getLogger(__name__)
 
@@ -40,10 +41,58 @@ ALLOWED_BINARIES: dict[str, AllowedBinary] = {
 }
 
 
+# Arguments that turn an allowlisted developer tool into a general code-execution or
+# destructive primitive. Matched exactly or as a `--flag=value` / attached prefix.
+DANGEROUS_ARGUMENTS: dict[str, frozenset[str]] = {
+    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0",
+                       "-fprintf", "-fls"}),
+    "node": frozenset({"-e", "--eval", "-p", "--print", "-r", "--require", "--import",
+                       "--loader", "--experimental-loader", "--inspect", "--inspect-brk"}),
+    "npm": frozenset({"exec", "x", "explore", "publish", "unpublish", "adduser", "login",
+                      "logout", "token", "owner", "access", "config", "set"}),
+    "yarn": frozenset({"dlx", "exec", "publish", "npm", "config", "login", "logout"}),
+    "pnpm": frozenset({"dlx", "exec", "publish", "config", "login", "logout"}),
+    "make": frozenset({"--eval", "-E"}),
+    "go": frozenset({"-exec", "-toolexec"}),
+    "cargo": frozenset({"--config", "-Z"}),
+    "gcc": frozenset({"-wrapper", "-fplugin", "-specs"}),
+    "g++": frozenset({"-wrapper", "-fplugin", "-specs"}),
+    "cmake": frozenset({"-P", "-E"}),
+}
+
+
+def _dangerous_argument(binary: str, arg: str) -> bool:
+    denied = DANGEROUS_ARGUMENTS.get(binary)
+    if not denied:
+        return False
+    head = arg.split("=", 1)[0]
+    if head in denied:
+        return True
+    # Attached short-option values, e.g. `-e"code"` or `-Zunstable`.
+    return any(d.startswith("-") and not d.startswith("--") and len(d) == 2 and arg.startswith(d)
+               for d in denied)
+
+
+def _path_candidates(arg: str) -> list[str]:
+    """Strings within an argument that may name a filesystem path."""
+    candidates = [arg]
+    if "=" in arg:
+        candidates.append(arg.split("=", 1)[1])
+    if arg.startswith("-") and not arg.startswith("--") and len(arg) > 2:
+        candidates.append(arg[2:])  # Attached value, e.g. -o/etc/x or -I../include
+    return [
+        c for c in candidates
+        if c and ("/" in c or "\\" in c or ".." in c or c.startswith("~") or ":" in c[:5]
+                  or c.lstrip(".").casefold().startswith(("env", "git", "jarvis")))
+    ]
+
+
 class GenericCommandInput(BaseModel):
     binary: str = Field(..., description="The binary to execute (must be on the allowlist).")
     args: list[str] = Field(default_factory=list, description="List of arguments for the command.")
-    timeout: int | None = Field(None, description="Optional custom timeout in seconds.")
+    timeout: int | None = Field(
+        None, ge=1, le=MAX_COMMAND_TIMEOUT, description="Optional custom timeout in seconds."
+    )
 
 
 class GenericCommandTool(BaseTool):
@@ -60,6 +109,12 @@ class GenericCommandTool(BaseTool):
 
     def get_input_schema(self) -> type[BaseModel]:
         return GenericCommandInput
+
+    def execution_timeout(self, inputs: dict[str, Any]) -> float:
+        # Let the runner's own timeout (which returns partial output) fire first.
+        allowed = ALLOWED_BINARIES.get(inputs.get("binary") or "")
+        command_timeout = inputs.get("timeout") or (allowed.default_timeout if allowed else 0)
+        return max(self.timeout_seconds, command_timeout + 10)
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
@@ -78,25 +133,26 @@ class GenericCommandTool(BaseTool):
             
             # 2. Workspace Confinement
             workspaces = kwargs.get("workspaces", [])
-            from jarvis.tools.filesystem import _get_validated_path
-            cwd = _get_validated_path(".", workspaces)
-            
-            # 3. Path Argument Validation
+            cwd = resolve_in_workspace(".", workspaces).path
+
             for i, arg in enumerate(args):
-                # Extract potential path from flags (e.g. --file=/etc/passwd -> /etc/passwd)
-                potential_path = arg.split("=", 1)[-1] if "=" in arg else arg
-                
-                # Check if it looks like a path (contains separators or traversal dots)
-                if ".." in potential_path or potential_path.startswith("/") or potential_path.startswith("\\") or ":" in potential_path[:5]:
+                # 3. Arguments that would allow arbitrary code execution or deletion
+                if _dangerous_argument(binary_name, arg):
+                    return ToolResult(
+                        success=False,
+                        error=f"Security Error: Argument {i+1} ('{arg}') is not permitted for '{binary_name}'.",
+                    )
+                # 4. Path arguments must stay inside the workspace and off protected paths
+                for candidate in _path_candidates(arg):
                     try:
-                        _get_validated_path(potential_path, workspaces)
+                        authorize_path(candidate, workspaces)
                     except (PermissionError, ValueError) as e:
                         return ToolResult(success=False, error=f"Security Error: Argument {i+1} ('{arg}') escapes workspace: {e}")
 
-            # 4. Determine Timeout
+            # 5. Determine Timeout
             timeout = kwargs.get("timeout") or allowed.default_timeout
 
-            # 5. Run Command
+            # 6. Run Command
             task_id = kwargs.get("task_id")
             res = await self._runner.run(
                 binary_name, 
@@ -106,7 +162,7 @@ class GenericCommandTool(BaseTool):
                 task_id=task_id
             )
             
-            # 6. Final Result
+            # 7. Final Result
             result_data = {
                 "command": res.command,
                 "exit_code": res.exit_code,

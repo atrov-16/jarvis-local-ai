@@ -13,8 +13,41 @@ from pydantic import BaseModel, Field
 
 from jarvis.tasks.command_runner import CommandRunner
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
+from jarvis.tools.path_policy import authorize_path, resolve_in_workspace
 
 LOG = logging.getLogger(__name__)
+
+# Seconds the executor waits beyond the command's own timeout, so the runner's timeout
+# (which still returns partial output) fires first.
+TIMEOUT_GRACE_SECONDS = 10
+
+_VENV_DIRS = (".venv", "venv", "env")
+_VENV_PYTHONS = (Path("bin") / "python", Path("Scripts") / "python.exe")
+
+
+def find_project_python(project_dir: Path) -> tuple[str, str]:
+    """Interpreter for running a project's Python tooling, and where it came from.
+
+    Prefer the project's own virtual environment (that is where its dependencies are
+    installed). Only without one does this fall back to Jarvis's interpreter, and the
+    caller reports that so a wrong-environment failure is explainable.
+    """
+    for venv in _VENV_DIRS:
+        for rel in _VENV_PYTHONS:
+            candidate = project_dir / venv / rel
+            if candidate.is_file():
+                return str(candidate), f"project:{venv}"
+    return sys.executable, "jarvis"
+
+
+def reject_option_like(name: str, value: str | None) -> None:
+    """Values passed to test/build commands must not be parsed as options."""
+    if value is None:
+        return
+    if value.startswith("-") or any(ch in value for ch in "\0\r\n"):
+        raise ValueError(
+            f"Invalid {name} {value!r}: must not start with '-' or contain control characters."
+        )
 
 
 class TestFramework(str, Enum):
@@ -41,7 +74,10 @@ class TestTool(BaseTool):
         super().__init__(
             name="test",
             description="Runs automated tests and extracts structured failure data.",
-            category=ToolCategory.READ_ONLY,
+            # Running a test suite executes arbitrary project code (tests, conftest.py,
+            # package scripts), so it is classified like command execution and always
+            # requires approval.
+            category=ToolCategory.SYSTEM,
             timeout_seconds=120,
         )
         self._runner = runner
@@ -49,11 +85,19 @@ class TestTool(BaseTool):
     def get_input_schema(self) -> type[BaseModel]:
         return TestToolInput
 
+    def execution_timeout(self, inputs: dict[str, Any]) -> float:
+        return self.timeout_seconds + TIMEOUT_GRACE_SECONDS
+
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            from jarvis.tools.filesystem import _get_validated_path
-            cwd = _get_validated_path(".", workspaces)
+            cwd = resolve_in_workspace(".", workspaces).path
+
+            reject_option_like("target", kwargs.get("target"))
+            reject_option_like("pattern", kwargs.get("pattern"))
+            if kwargs.get("target"):
+                # Test files/directories must be inside the workspace and not protected.
+                authorize_path(kwargs["target"], workspaces)
             
             framework = kwargs.get("framework", TestFramework.AUTO)
             if framework == TestFramework.AUTO:
@@ -62,7 +106,8 @@ class TestTool(BaseTool):
                     return ToolResult(success=False, error="Could not auto-detect test framework. Please specify it explicitly.")
 
             # 1. Prepare Command
-            cmd, args = self._prepare_command(framework, kwargs)
+            python_exe, interpreter_source = find_project_python(cwd)
+            cmd, args = self._prepare_command(framework, kwargs, python_exe)
             
             # 2. Run Command
             task_id = kwargs.get("task_id")
@@ -78,8 +123,11 @@ class TestTool(BaseTool):
                 f"Skipped: {parsed_data['skipped']} | Duration: {parsed_data['duration'] or 'unknown'}"
             )
             
+            uses_python = framework in (TestFramework.PYTEST, TestFramework.UNITTEST)
             result_data = {
                 "framework": framework.value,
+                "interpreter": cmd if uses_python else None,
+                "interpreter_source": interpreter_source if uses_python else None,
                 "status": "passed" if parsed_data["failed"] == 0 and res.exit_code == 0 else "failed",
                 "counts": {
                     "passed": parsed_data["passed"],
@@ -113,8 +161,10 @@ class TestTool(BaseTool):
             return TestFramework.UNITTEST
         return None
 
-    def _prepare_command(self, framework: TestFramework, inputs: dict) -> tuple[str, list[str]]:
-        python_exe = sys.executable
+    def _prepare_command(
+        self, framework: TestFramework, inputs: dict, python_exe: str | None = None
+    ) -> tuple[str, list[str]]:
+        python_exe = python_exe or sys.executable
         target = inputs.get("target")
         pattern = inputs.get("pattern")
         

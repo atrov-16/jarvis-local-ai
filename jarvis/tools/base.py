@@ -44,6 +44,15 @@ class BaseTool(ABC):
         self.category = category
         self.timeout_seconds = timeout_seconds
 
+    def execution_timeout(self, inputs: dict[str, Any]) -> float:
+        """Upper bound the executor enforces on `execute`, given the validated inputs.
+
+        Tools that run subprocesses with their own (possibly caller-configured) timeout
+        override this so the executor never cuts a command off before its own timeout
+        fires and returns a structured result.
+        """
+        return self.timeout_seconds
+
     @abstractmethod
     def get_input_schema(self) -> type[BaseModel]:
         """Return the Pydantic model for this tool's input."""
