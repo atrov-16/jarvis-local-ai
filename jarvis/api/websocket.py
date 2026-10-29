@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import WebSocket, status
 
 from jarvis.config.models import JarvisConfig
-from jarvis.config.secrets import SecretManager
+from jarvis.config.secrets import SecretManager, tokens_match
 
 
 async def authenticate_websocket(
@@ -19,12 +19,14 @@ async def authenticate_websocket(
         return True
 
     expected = secret_manager.get_api_token()
+    # The query parameter is kept for compatibility; the log redaction filter strips it from
+    # uvicorn's request logs. Prefer the Authorization header.
     supplied = websocket.query_params.get("token")
     authorization = websocket.headers.get("authorization")
     if supplied is None and authorization is not None and authorization.startswith("Bearer "):
         supplied = authorization[len("Bearer ") :]
 
-    if expected is None or supplied != expected:
+    if not tokens_match(supplied, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return False
 

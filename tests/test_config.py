@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jarvis.config import paths
 from jarvis.config.manager import load_config
 
 
@@ -11,7 +12,9 @@ def test_loads_defaults_without_config(monkeypatch) -> None:
 
     assert config.server.host == "127.0.0.1"
     assert config.security.api_token_enabled is True
-    assert config.memory.database_path == Path(".jarvis/dev/memory.sqlite")
+    assert config.memory.database_path == paths.default_database_path()
+    assert config.memory.database_path.is_absolute()
+    assert config.models.reflection_max_tokens == 1024
 
 
 def test_loads_explicit_config_file(tmp_path: Path) -> None:

@@ -46,10 +46,13 @@ def _apply_env_overrides(config: JarvisConfig) -> JarvisConfig:
     if not updates:
         return config
 
-    current = config.model_dump(mode="python")
+    sections: dict[str, Any] = {}
     for section, values in updates.items():
-        current_section = dict(current.get(section, {}))
-        current_section.update(values)
-        current[section] = current_section
-    return JarvisConfig.model_validate(current)
+        current = getattr(config, section)
+        # Re-validate only what was set explicitly, so `model_fields_set` still tells
+        # configured values from defaults (see the database location check at startup).
+        data = current.model_dump(include=current.model_fields_set)
+        data.update(values)
+        sections[section] = type(current).model_validate(data)
+    return config.model_copy(update=sections)
 

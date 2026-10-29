@@ -203,6 +203,51 @@ OPENROUTER_API_KEY=your_api_key_here
 JARVIS_API_TOKEN=your_local_api_token
 ```
 
+If `JARVIS_API_TOKEN` is not set, the daemon generates a token on first start and stores it in
+the OS credential store (Windows Credential Manager; service `Jarvis`, account `API Token`),
+where the CLI finds it. The token value is never written to the log. If the credential store is
+unavailable, the daemon refuses to start and asks you to set `JARVIS_API_TOKEN`.
+
+## Database location
+
+By default the database is `memory.sqlite` in the per-user data directory, whichever directory
+you start Jarvis from:
+
+| Platform | Default database |
+|---|---|
+| Windows | `%APPDATA%\Jarvis\memory.sqlite` |
+| macOS (development) | `~/Library/Application Support/Jarvis/memory.sqlite` |
+| Linux (development) | `$XDG_DATA_HOME/Jarvis/memory.sqlite` (`~/.local/share/...`) |
+
+To use another file, set `JARVIS_DATABASE_PATH`, or `database_path` in the `[memory]` section of
+a config file (`--config`, or `JARVIS_CONFIG_PATH`). The environment variable wins. `~` and
+environment variables are expanded (`%APPDATA%` on Windows, where `$` is left as is;
+`$HOME` / `${VAR}` elsewhere). A relative path is resolved against the
+working directory, so prefer an absolute one; the daemon logs a warning for relative paths. The
+daemon logs the database it opens at startup, and `GET /v1/status` reports it under `storage`.
+
+**Upgrading from an earlier version.** The default used to be `.jarvis\dev\memory.sqlite`
+relative to the directory the daemon was started from (normally the repository root). If such a
+database exists in the current directory or the repository root and the new default does not,
+the daemon refuses to start rather than create a second, empty database. Nothing is moved
+automatically. Either keep using the existing database:
+
+```env
+JARVIS_DATABASE_PATH=C:\path\to\jarvis-local-ai\.jarvis\dev\memory.sqlite
+```
+
+or stop the daemon and move `memory.sqlite`, together with any `memory.sqlite-wal` and
+`memory.sqlite-shm` files beside it, into `%APPDATA%\Jarvis\`. Migrations are unchanged: the
+database is upgraded in place on the next start, wherever it lives.
+
+## Model providers
+
+Requests go to `primary_provider` (default `openrouter`). After a transient failure (timeout,
+rate limit, 5xx) or HTTP 402 (insufficient OpenRouter credits), the request is sent once to
+`fallback_provider` (default `ollama`, at `http://localhost:11434`); set `fallback_provider = ""`
+in `[models]` to disable the fallback. Authentication errors do not fall back. Background
+reflection requests at most `reflection_max_tokens` output tokens (default 1024).
+
 ---
 
 # Running Jarvis

@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from pydantic import ValidationError
 
 from jarvis.models.providers import (
     ModelProvider,
@@ -41,8 +42,14 @@ class OllamaProvider(ModelProvider):
             ],
             "stream": False,
         }
+        options: dict[str, object] = {}
         if request.temperature is not None:
-            payload["options"] = {"temperature": request.temperature}
+            options["temperature"] = request.temperature
+        if request.max_tokens:
+            # Ollama's name for the output-token limit.
+            options["num_predict"] = request.max_tokens
+        if options:
+            payload["options"] = options
 
         async with httpx.AsyncClient() as client:
             try:
@@ -100,7 +107,7 @@ class OllamaProvider(ModelProvider):
                 provider_name=self.name,
                 model_used=str(data.get("model", "")),
             )
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, AttributeError, ValidationError) as e:
             raise ModelProviderError(f"Ollama response parsing failed: {e}") from e
 
     def _handle_http_errors(self, response: httpx.Response) -> None:

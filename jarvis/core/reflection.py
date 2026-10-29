@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from jarvis.core.event_bus import EventBus
 from jarvis.memory.store import MemoryStore
+from jarvis.models.providers import ModelProviderError, RetryableProviderError
 from jarvis.models.router import ModelRouter
 from jarvis.models.schemas import Message, ModelRequest
 from jarvis.storage.unit_of_work import UnitOfWork
@@ -19,6 +20,9 @@ if TYPE_CHECKING:
     pass
 
 LOG = logging.getLogger(__name__)
+
+# Reflection returns a short JSON document; see ModelsConfig.reflection_max_tokens.
+DEFAULT_REFLECTION_MAX_TOKENS = 1024
 
 REFLECTION_PROMPT = """You are the Reflection Brain of Jarvis, a local-first AI assistant.
 Your goal is to analyze a completed task trace and identify high-signal "Fact" or "Preference" memories that should be saved for future tasks.
@@ -122,13 +126,18 @@ class ReflectionService:
         uow: UnitOfWork, 
         event_bus: EventBus, 
         model_router: ModelRouter,
-        memory_store: MemoryStore
+        memory_store: MemoryStore,
+        max_tokens: int = DEFAULT_REFLECTION_MAX_TOKENS,
     ) -> None:
         self._uow = uow
         self._event_bus = event_bus
         self._model_router = model_router
         self._memory_store = memory_store
+        self._max_tokens = max_tokens
         self._listener_task: asyncio.Task[None] | None = None
+        # In-flight reflections, kept so they are not garbage-collected mid-run and so
+        # stop() can wind them down while the event loop is still running.
+        self._reflections: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._aggregator = TraceAggregator(uow)
         self._semaphore = asyncio.Semaphore(2)  # Throttling: max 2 concurrent reflections
@@ -142,7 +151,16 @@ class ReflectionService:
         self._stop_event.set()
         if self._listener_task:
             self._listener_task.cancel()
+            await asyncio.gather(self._listener_task, return_exceptions=True)
             self._listener_task = None
+        # Reflection is optional work: cancel what is still running and wait for it to unwind
+        # (closing its database connections) instead of leaving it on a closing event loop.
+        pending = list(self._reflections)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            LOG.info(f"Cancelled {len(pending)} in-flight reflection(s).")
         LOG.info("ReflectionService stopped.")
 
     async def _listener_loop(self) -> None:
@@ -155,26 +173,44 @@ class ReflectionService:
                     project_id = str(event.payload.get("project_id")) if event.payload.get("project_id") else None
                     if task_id:
                         # Process in background with throttling
-                        asyncio.create_task(self._safe_reflect(task_id, project_id))
+                        reflection = asyncio.create_task(self._safe_reflect(task_id, project_id))
+                        self._reflections.add(reflection)
+                        reflection.add_done_callback(self._reflections.discard)
         except asyncio.CancelledError:
             pass
         finally:
             await subscription.close()
 
     async def _safe_reflect(self, task_id: str, project_id: str | None, retries: int = 2) -> None:
-        """Throttled wrapper for reflection with retry logic."""
+        """Throttled wrapper for reflection. It never raises: the task is already completed.
+
+        Only transient provider errors are retried. Anything else (bad credentials, HTTP 402,
+        unparsable output) would fail the same way again, and be billed again.
+        """
         async with self._semaphore:
             for attempt in range(retries + 1):
                 try:
                     await self.reflect_on_task(task_id, project_id)
                     return
-                except Exception as e:
+                except RetryableProviderError as e:
                     if attempt < retries:
                         wait = 2 ** attempt
                         LOG.warning(f"Reflection attempt {attempt + 1} failed for {task_id}, retrying in {wait}s: {e}")
                         await asyncio.sleep(wait)
                     else:
-                        LOG.exception(f"Reflection failed for task {task_id} after {retries} retries.")
+                        LOG.error(
+                            f"Reflection failed for task {task_id} "
+                            f"after {retries + 1} attempts: {e}"
+                        )
+                except ModelProviderError as e:
+                    LOG.error(
+                        f"Reflection failed for task {task_id} "
+                        f"({type(e).__name__}, not retried): {e}"
+                    )
+                    return
+                except Exception:
+                    LOG.exception(f"Reflection failed for task {task_id} (not retried).")
+                    return
 
     async def reflect_on_task(self, task_id: str, project_id: str | None = None) -> None:
         """Analyze a task and propose memories if it meets thresholds."""
@@ -203,7 +239,7 @@ class ReflectionService:
             Message(role="user", content="Analyze the trace and propose any new Fact or Preference memories."),
         ]
         
-        request = ModelRequest(messages=messages, temperature=0.0, max_tokens=4096)
+        request = ModelRequest(messages=messages, temperature=0.0, max_tokens=self._max_tokens)
         response = await self._model_router.complete(request)
         content = response.message.content.strip()
         

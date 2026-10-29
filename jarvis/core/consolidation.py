@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
+# Consolidation returns a short JSON document of merge/conflict actions.
+DEFAULT_CONSOLIDATION_MAX_TOKENS = 1024
+
 CONSOLIDATION_PROMPT = """You are the Memory Consolidation Brain of Jarvis.
 Your goal is to analyze a cluster of related memories and identify potential duplicates or contradictions.
 
@@ -65,11 +68,13 @@ class ConsolidationService:
         self,
         uow: UnitOfWork,
         model_router: ModelRouter,
-        memory_store: MemoryStore
+        memory_store: MemoryStore,
+        max_tokens: int = DEFAULT_CONSOLIDATION_MAX_TOKENS,
     ) -> None:
         self._uow = uow
         self._model_router = model_router
         self._memory_store = memory_store
+        self._max_tokens = max_tokens
         self._semaphore = asyncio.Semaphore(1) # Run only one consolidation at a time
 
     async def consolidate_all(self, project_id: str | None = None) -> int:
@@ -129,7 +134,7 @@ class ConsolidationService:
                 Message(role="user", content="Analyze this cluster for merges or conflicts."),
             ]
             
-            request = ModelRequest(messages=messages, temperature=0.0, max_tokens=4096)
+            request = ModelRequest(messages=messages, temperature=0.0, max_tokens=self._max_tokens)
             response = await self._model_router.complete(request)
             content = response.message.content.strip()
             

@@ -8,7 +8,7 @@ import uvicorn
 
 from jarvis.api.http import create_app
 from jarvis.config.manager import load_config
-from jarvis.logging.setup import setup_logging
+from jarvis.logging.setup import setup_logging, uvicorn_log_config
 
 
 def run_daemon(config_path: Path | None = None) -> None:
@@ -22,5 +22,10 @@ def run_daemon(config_path: Path | None = None) -> None:
     config = load_config(config_path)
     setup_logging(config.logging.level)
     app = create_app(config=config)
-    uvicorn.run(app, host=config.server.host, port=config.server.port)
+    uvicorn.run(
+        app,
+        host=config.server.host,
+        port=config.server.port,
+        log_config=uvicorn_log_config(),
+    )
 

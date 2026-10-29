@@ -21,6 +21,15 @@ class RetryableProviderError(ModelProviderError):
     pass
 
 
+class InsufficientCreditsError(ModelProviderError):
+    """Raised when the provider refuses a request it cannot bill (HTTP 402).
+
+    Not retryable: the same request fails again until credits are added. Another provider
+    (e.g. a local Ollama fallback) can still serve it.
+    """
+    pass
+
+
 class UnsupportedFeatureError(ModelProviderError):
     """Raised when a request asks for a feature the provider/model cannot support."""
     pass

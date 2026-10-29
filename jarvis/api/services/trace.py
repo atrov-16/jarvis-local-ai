@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 
 from jarvis.api.schemas import TaskSummaryResponse, TaskTraceResponse, TraceEntry
 from jarvis.logging.redaction import redact_text
+from jarvis.models.providers import ModelProviderError
 from jarvis.models.router import ModelRouter
 from jarvis.models.schemas import Message, ModelRequest
 from jarvis.storage.unit_of_work import UnitOfWork
@@ -26,6 +28,14 @@ Trace:
 Provide ONLY the summary text. No preamble.
 """
 
+# A summary is cached only once the task can no longer change.
+TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+
+class TaskNotFoundError(ValueError):
+    """The requested task does not exist."""
+
+
 class TraceService:
     def __init__(self, uow: UnitOfWork, model_router: ModelRouter | None = None) -> None:
         self._uow = uow
@@ -39,7 +49,7 @@ class TraceService:
             # 1. Fetch Task and Steps
             task = await unit.repositories.tasks.get(task_id)
             if not task:
-                raise ValueError(f"Task not found: {task_id}")
+                raise TaskNotFoundError(f"Task not found: {task_id}")
             
             steps = await unit.repositories.tasks.list_steps(task_id)
             step_map = {s["id"]: s for s in steps}
@@ -119,13 +129,20 @@ class TraceService:
 
             return TaskTraceResponse(task_id=task_id, entries=entries)
 
-    async def get_task_summary(self, task_id: str, secrets: list[str] = []) -> TaskSummaryResponse:
-        """Generate or retrieve a high-level summary of the task."""
+    async def get_task_summary(
+        self, task_id: str, secrets: Sequence[str] = ()
+    ) -> TaskSummaryResponse:
+        """Generate or retrieve a high-level summary of the task.
+
+        `secrets` are redacted from the prompt sent to the model and from everything returned.
+        Raises TaskNotFoundError for an unknown task. A provider failure is reported in the
+        summary text; any other error propagates.
+        """
         async with self._uow.begin() as unit:
             assert unit.repositories is not None
             task = await unit.repositories.tasks.get(task_id)
             if not task:
-                raise ValueError(f"Task not found: {task_id}")
+                raise TaskNotFoundError(f"Task not found: {task_id}")
             
             metadata = task.get("metadata", {})
             if "summary" in metadata:
@@ -150,39 +167,45 @@ class TraceService:
         
         try:
             messages = [
-                Message(role="system", content=SUMMARY_PROMPT_TEMPLATE % (
+                Message(role="system", content=redact_text(SUMMARY_PROMPT_TEMPLATE % (
                     task.get("user_request", "").replace("%", "%%"),
                     task["status"],
                     trace_text.replace("%", "%%")
-                )),
+                ), secrets)),
                 Message(role="user", content="Summarize this task.")
             ]
             
             request = ModelRequest(messages=messages, temperature=0.0, max_tokens=2048)
             response = await self._model_router.complete(request)
-            summary = response.message.content.strip()
-            summary = redact_text(summary, secrets)
-            
-            # Cache the summary
-            async with self._uow.begin() as unit:
-                assert unit.repositories is not None
-                metadata["summary"] = summary
-                metadata["outcome"] = "success" if task["status"] == "completed" else "failed"
-                # Wall time calculation
-                if task["started_at"] and task["completed_at"]:
-                    start = datetime.fromisoformat(str(task["started_at"]))
-                    end = datetime.fromisoformat(str(task["completed_at"]))
-                    metadata["wall_time"] = f"{(end - start).total_seconds():.1f}s"
-                
-                await unit.repositories.tasks.update(task_id, metadata_json=json.dumps(metadata))
-            
+        except ModelProviderError as e:
+            error = redact_text(str(e), secrets)
+            LOG.warning(f"Failed to generate summary for task {task_id}: {error}")
             return TaskSummaryResponse(
                 task_id=task_id,
                 status=str(task["status"]),
-                summary=redact_text(summary, secrets),
-                outcome=metadata.get("outcome"),
-                wall_time=metadata.get("wall_time")
+                summary=f"Error generating summary: {error}",
             )
-        except Exception as e:
-            LOG.exception(f"Failed to generate summary for task {task_id}: {e}")
-            return TaskSummaryResponse(task_id=task_id, status=str(task["status"]), summary=f"Error generating summary: {e}")
+
+        summary = redact_text(response.message.content.strip(), secrets)
+
+        metadata["summary"] = summary
+        metadata["outcome"] = "success" if task["status"] == "completed" else "failed"
+        # Wall time calculation
+        if task["started_at"] and task["completed_at"]:
+            start = datetime.fromisoformat(str(task["started_at"]))
+            end = datetime.fromisoformat(str(task["completed_at"]))
+            metadata["wall_time"] = f"{(end - start).total_seconds():.1f}s"
+
+        # Cache the summary
+        if task["status"] in TERMINAL_STATUSES:
+            async with self._uow.begin() as unit:
+                assert unit.repositories is not None
+                await unit.repositories.tasks.update(task_id, metadata_json=json.dumps(metadata))
+
+        return TaskSummaryResponse(
+            task_id=task_id,
+            status=str(task["status"]),
+            summary=summary,
+            outcome=metadata.get("outcome"),
+            wall_time=metadata.get("wall_time")
+        )

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from jarvis.config import paths
+
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
@@ -22,10 +24,14 @@ class ModelsConfig(BaseModel):
     default_model: str = "openai/gpt-4.1"
     local_model: str = "llama3.1"
     request_timeout_seconds: int = 120
+    # Output-token budget for background reflection, which returns a short JSON document.
+    reflection_max_tokens: int = Field(default=1024, ge=1)
 
 
 class MemoryConfig(BaseModel):
-    database_path: Path = Path(".jarvis/dev/memory.sqlite")
+    # Default: the per-user data directory (%APPDATA%\Jarvis on Windows), independent of the
+    # working directory. Resolved through the module so tests can redirect it.
+    database_path: Path = Field(default_factory=lambda: paths.default_database_path())
     short_term_retention_days: int = 30
 
 
