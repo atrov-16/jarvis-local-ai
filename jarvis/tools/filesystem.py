@@ -11,9 +11,8 @@ from pydantic import BaseModel, Field
 
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
 from jarvis.tools.patch_engine import PatchEngine, PatchHunk
+from jarvis.tools.path_policy import authorize_path, is_protected, resolve_in_workspace
 from jarvis.tools.trash_manager import TrashManager
-
-PROTECTED_PATHS = {".git", ".jarvis", ".env"}
 ...
 class PatchHunkInput(BaseModel):
     search: str = Field(..., description="The exact block of code to find.")
@@ -42,7 +41,7 @@ class PatchFileTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            path = _get_validated_path(kwargs["path"], workspaces)
+            path = authorize_path(kwargs["path"], workspaces).path
             hunks = [PatchHunk(h.search, h.replace) for h in kwargs["hunks"]]
             
             if not path.is_file():
@@ -108,27 +107,11 @@ class PatchFileTool(BaseTool):
 
 
 def _get_validated_path(target_path_str: str, workspaces: list[dict]) -> Path:
-    """Resolve and validate that a path is within at least one workspace."""
-    target_path = Path(target_path_str).expanduser()
-    
-    # Check if target_path is absolute or relative
-    # If relative, we must decide which workspace it's relative to.
-    # For simplicity in V1, if it's relative, we try to resolve it against each workspace.
-    # But usually the LLM provides absolute paths it found via list_directory.
-    
-    for ws in workspaces:
-        ws_root = Path(str(ws["path"])).resolve()
-        
-        # Try resolving relative to this workspace if not absolute
-        if not target_path.is_absolute():
-            potential_path = (ws_root / target_path).resolve()
-        else:
-            potential_path = target_path.resolve()
-            
-        if potential_path.is_relative_to(ws_root):
-            return potential_path
-            
-    raise PermissionError(f"Path is outside allowed workspaces: {target_path_str}")
+    """Resolve a path inside an enabled workspace (used for command working directories).
+
+    File operations use `path_policy.authorize_path`, which also rejects protected paths.
+    """
+    return resolve_in_workspace(target_path_str, workspaces).path
 
 
 class ReadFileInput(BaseModel):
@@ -151,7 +134,7 @@ class ReadFileTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            path = _get_validated_path(kwargs["path"], workspaces)
+            path = authorize_path(kwargs["path"], workspaces).path
             
             if not path.is_file():
                 return ToolResult(success=False, error=f"Not a file: {path}")
@@ -182,13 +165,17 @@ class ListDirectoryTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            path = _get_validated_path(kwargs["path"], workspaces)
+            authorized = authorize_path(kwargs["path"], workspaces)
+            path = authorized.path
             
             if not path.is_dir():
                 return ToolResult(success=False, error=f"Not a directory: {path}")
                 
             items = []
             for item in path.iterdir():
+                # Protected entries (secrets, VCS internals, Jarvis data) are not exposed.
+                if is_protected(path / item.name, authorized.root):
+                    continue
                 items.append({
                     "name": item.name,
                     "type": "directory" if item.is_dir() else "file",
@@ -220,7 +207,7 @@ class WriteFileTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            path = _get_validated_path(kwargs["path"], workspaces)
+            path = authorize_path(kwargs["path"], workspaces).path
             
             # Ensure parent directory exists
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,35 +238,21 @@ class DeleteFileTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            path = _get_validated_path(kwargs["path"], workspaces)
+            # 1. Workspace confinement and protected-path enforcement (any path segment)
+            authorized = authorize_path(kwargs["path"], workspaces)
+            path = authorized.path
             task_id = kwargs.get("task_id")
 
-            # 1. Protected Path Enforcement
-            if path.name in PROTECTED_PATHS:
-                return ToolResult(success=False, error=f"Access Denied: '{path.name}' is a protected system path.")
-            
             # 2. Workspace Root Protection
-            for ws in workspaces:
-                if path.resolve() == Path(str(ws["path"])).resolve():
-                    return ToolResult(success=False, error="Access Denied: Cannot delete a workspace root directory.")
+            if authorized.is_root:
+                return ToolResult(success=False, error="Access Denied: Cannot delete a workspace root directory.")
 
             # 3. Directory check
             if path.is_dir() and not kwargs.get("recursive"):
                 return ToolResult(success=False, error=f"'{path}' is a directory. Use recursive=True to delete.")
 
-            # 4. Perform Soft-Delete
-            # TrashManager needs to know which workspace root to use.
-            ws_root = None
-            for ws in workspaces:
-                root = Path(str(ws["path"])).resolve()
-                if path.resolve().is_relative_to(root):
-                    ws_root = root
-                    break
-            
-            if not ws_root:
-                return ToolResult(success=False, error="Could not identify workspace root for trash.")
-
-            trash_manager = TrashManager(ws_root)
+            # 4. Perform Soft-Delete into the trash of the workspace that authorised the path.
+            trash_manager = TrashManager(authorized.root)
             entry_id = trash_manager.trash(path, task_id=task_id)
 
             return ToolResult(
@@ -314,9 +287,14 @@ class RestoreFileTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             workspaces = kwargs.get("workspaces", [])
-            ws_path = _get_validated_path(kwargs["workspace_path"], workspaces)
+            authorized = resolve_in_workspace(kwargs["workspace_path"], workspaces)
+            if not authorized.is_root:
+                return ToolResult(
+                    success=False, error="workspace_path must be the root of an allowed workspace."
+                )
             
-            trash_manager = TrashManager(ws_path)
+            # TrashManager.restore re-validates the trash id and the restore destination.
+            trash_manager = TrashManager(authorized.root)
             restored_path = trash_manager.restore(kwargs["trash_id"])
             
             return ToolResult(success=True, data=f"Successfully restored to: {restored_path}")

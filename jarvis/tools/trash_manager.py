@@ -7,7 +7,9 @@ import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+from jarvis.tools.path_policy import authorize_path
 
 LOG = logging.getLogger(__name__)
 
@@ -82,14 +84,25 @@ class TrashManager:
         return entry_id
 
     def restore(self, entry_id: str) -> Path:
-        """Restore a trashed entry to its original location."""
+        """Restore a trashed entry to its original location.
+
+        The id must be a trash UUID (no path components) and the recorded destination is
+        re-validated: metadata is a file on disk and must not be trusted to stay inside
+        this workspace or out of protected paths.
+        """
+        try:
+            entry_id = str(UUID(entry_id))
+        except ValueError:
+            raise ValueError(f"Invalid trash entry id: {entry_id!r}") from None
+
         metadata_path = self.metadata_dir / f"{entry_id}.json"
         if not metadata_path.exists():
             raise ValueError(f"Trash entry not found: {entry_id}")
 
         entry = TrashEntry.from_dict(json.loads(metadata_path.read_text(encoding="utf-8")))
         source_path = self.entries_dir / entry_id
-        target_path = Path(entry.original_path)
+        # Raises PermissionError if the destination escapes the workspace or is protected.
+        target_path = authorize_path(entry.original_path, [{"path": str(self.workspace_root)}]).path
 
         if not source_path.exists():
             raise FileNotFoundError(f"Trashed content not found for entry: {entry_id}")

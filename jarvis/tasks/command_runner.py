@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import time
 import uuid
@@ -36,6 +37,73 @@ def _spawn_isolation_kwargs() -> dict[str, object]:
     # setsid() in the child: it becomes leader of a new session and process group
     # whose id equals its pid.
     return {"start_new_session": True}
+
+
+# Upper bound for any caller-requested command timeout (seconds).
+MAX_COMMAND_TIMEOUT = 3600
+
+# Environment variables a child process may inherit. Everything else (provider API keys,
+# GITHUB_TOKEN, cloud credentials, npm auth tokens, NODE_OPTIONS ...) is withheld.
+_INHERITED_ENV_NAMES = frozenset({
+    # Process basics
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ",
+    "TMPDIR", "TMP", "TEMP", "PWD", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "CI",
+    # Windows
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE",
+    "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER", "OS", "ALLUSERSPROFILE", "PUBLIC",
+    # Toolchain locations (paths only, never credentials)
+    "VIRTUAL_ENV", "CONDA_PREFIX", "PYENV_ROOT", "CARGO_HOME", "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOFLAGS",
+    "JAVA_HOME", "NVM_DIR", "NVM_BIN", "VOLTA_HOME", "PNPM_HOME", "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
+})
+_INHERITED_ENV_PREFIXES = ("LC_",)
+
+
+def _child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for a child: allowlisted host variables plus caller-supplied ones."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _INHERITED_ENV_NAMES or name.upper().startswith(_INHERITED_ENV_PREFIXES)
+    }
+    if extra:
+        env.update(extra)
+    # Never pass Jarvis's own secrets, even if a caller supplied them explicitly.
+    for key in ("JARVIS_API_TOKEN", "OPENROUTER_API_KEY", "OLLAMA_HOST"):
+        env.pop(key, None)
+    return env
+
+
+# Characters cmd.exe interprets even inside quotes when it re-parses a batch file's
+# arguments. Rejected outright: batch-file argument escaping cannot be made safe.
+_BATCH_UNSAFE_CHARS = frozenset('"&|<>^%!\r\n')
+
+
+def _resolve_executable(cmd: str, args: list[str]) -> str:
+    """Resolve the program to launch.
+
+    On Windows, CreateProcess only appends `.exe`, so `npm`, `yarn` and `pnpm` (shipped
+    as `.cmd` shims) are not found by name. Resolve through PATH/PATHEXT instead. A
+    batch target is run by cmd.exe, which re-parses its arguments, so arguments with
+    shell metacharacters are refused rather than escaped.
+    """
+    if not _is_windows():
+        return cmd
+    resolved = shutil.which(cmd)
+    if resolved is None:
+        return cmd
+    if Path(resolved).suffix.lower() in (".cmd", ".bat"):
+        for arg in args:
+            if any(ch in _BATCH_UNSAFE_CHARS for ch in arg):
+                raise ValueError(
+                    f"Argument {arg!r} contains characters that are unsafe for batch "
+                    f"program {Path(resolved).name}."
+                )
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -99,22 +167,16 @@ class CommandRunner:
         """
         start_time = time.perf_counter()
         
-        # 1. Prepare Environment
-        # We start with a clean copy and remove Jarvis-specific secrets
-        process_env = os.environ.copy()
-        if env:
-            process_env.update(env)
-            
-        forbidden_keys = {"JARVIS_API_TOKEN", "OPENROUTER_API_KEY", "OLLAMA_HOST"}
-        for key in forbidden_keys:
-            process_env.pop(key, None)
+        # 1. Prepare Environment: allowlisted variables only (no inherited secrets)
+        process_env = _child_environment(env)
+        program = _resolve_executable(cmd, args)
 
         # 2. Start Process
         # The child gets its own session/process group (POSIX) or process group (Windows)
         # so the entire child tree can be terminated without touching Jarvis itself.
         # shell=False always.
         process = await asyncio.create_subprocess_exec(
-            cmd,
+            program,
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

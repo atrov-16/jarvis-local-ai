@@ -11,10 +11,35 @@ from typing import Any
 from pydantic import ValidationError
 
 from jarvis.approvals.broker import ApprovalBroker
-from jarvis.tools.base import ToolResult
+from jarvis.tools.base import BaseTool, ToolResult
 from jarvis.tools.registry import ToolRegistry
 
 LOG = logging.getLogger(__name__)
+
+# Execution context the tool must receive from Jarvis, never from model-supplied input:
+# these decide what a tool may touch.
+RESERVED_CONTEXT_KEYS = frozenset({"workspaces", "uow", "project_id", "current_task_id"})
+
+
+def _merge_context(
+    inputs: dict[str, Any], context: dict[str, Any], provided: set[str]
+) -> dict[str, Any]:
+    """Combine validated tool inputs with execution context into one kwargs dict.
+
+    - A schema field named after a reserved context key is a tool bug and is refused.
+    - An input field that shadows another context key (e.g. `task_id` in
+      get_task_status) overrides it only when the caller actually supplied a value;
+      an unset optional field keeps the context value.
+    """
+    clashes = RESERVED_CONTEXT_KEYS.intersection(inputs)
+    if clashes:
+        raise ValueError(f"Tool input schema declares reserved context keys: {sorted(clashes)}")
+    merged = dict(context)
+    for key, value in inputs.items():
+        if key in context and key not in provided:
+            continue
+        merged[key] = value
+    return merged
 
 
 class ToolExecutor:
@@ -75,19 +100,30 @@ class ToolExecutor:
             # 4. Validate input
             schema = tool.get_input_schema()
             try:
-                validated_inputs = schema(**inputs).model_dump()
+                model = schema(**inputs)
             except ValidationError as e:
                 return ToolResult(success=False, error=f"Input validation failed: {e}")
+            # Shallow: top-level fields keep their validated types, so nested models stay
+            # models (tools read e.g. `hunk.search`), unlike model_dump().
+            validated_inputs = {name: getattr(model, name) for name in type(model).model_fields}
+
+            try:
+                call_kwargs = _merge_context(validated_inputs, context, model.model_fields_set)
+            except ValueError as e:
+                return ToolResult(success=False, error=str(e))
 
             # 5. Execute with Timeout
-            LOG.info(f"Executing tool '{tool_name}' (category: {tool.category.value}, timeout: {tool.timeout_seconds}s)")
-            
+            # Duck-typed tools (not BaseTool subclasses) only provide timeout_seconds.
+            timeout = (
+                tool.execution_timeout(validated_inputs)
+                if isinstance(tool, BaseTool)
+                else tool.timeout_seconds
+            )
+            LOG.info(f"Executing tool '{tool_name}' (category: {tool.category.value}, timeout: {timeout}s)")
+
             start_time = time.perf_counter()
             try:
-                result = await asyncio.wait_for(
-                    tool.execute(**validated_inputs, **context),
-                    timeout=tool.timeout_seconds
-                )
+                result = await asyncio.wait_for(tool.execute(**call_kwargs), timeout=timeout)
                 execution_time = time.perf_counter() - start_time
                 
                 # Update result with execution time
@@ -100,10 +136,10 @@ class ToolExecutor:
                 )
             except TimeoutError:
                 execution_time = time.perf_counter() - start_time
-                LOG.warning(f"Tool '{tool_name}' timed out after {tool.timeout_seconds}s")
+                LOG.warning(f"Tool '{tool_name}' timed out after {timeout}s")
                 return ToolResult(
                     success=False,
-                    error=f"Tool execution timed out after {tool.timeout_seconds} seconds.",
+                    error=f"Tool execution timed out after {timeout} seconds.",
                     execution_time=execution_time,
                     timeout_occurred=True
                 )
