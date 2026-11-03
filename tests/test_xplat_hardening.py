@@ -274,3 +274,52 @@ async def test_new_data_directory_and_database_are_private(tmp_path):
         pass
     assert (database.parent.stat().st_mode & 0o777) == 0o700
     assert (database.stat().st_mode & 0o777) == 0o600
+
+
+# --- NTFS directory junctions (no privilege needed, unlike symlinks) -----------------------
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def junction_workspace(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside")
+    (workspace / ".git").mkdir()
+    (workspace / ".git" / "config").write_text("config")
+    _make_junction(workspace / "escape", outside)
+    _make_junction(workspace / "gitlink", workspace / ".git")
+    return workspace
+
+
+@windows_only
+@pytest.mark.parametrize("relative", ["escape", "escape/secret.txt"])
+def test_junction_out_of_the_workspace_is_denied(junction_workspace, relative):
+    with pytest.raises(PermissionError, match="outside allowed workspaces"):
+        authorize_path(relative, [{"path": str(junction_workspace)}])
+
+
+@windows_only
+@pytest.mark.parametrize("relative", ["gitlink", "gitlink/config"])
+def test_junction_onto_a_protected_directory_is_denied(junction_workspace, relative):
+    with pytest.raises(PermissionError, match="protected"):
+        authorize_path(relative, [{"path": str(junction_workspace)}])
+
+
+@windows_only
+async def test_read_file_through_a_junction_cannot_leave_the_workspace(junction_workspace):
+    from jarvis.tools.filesystem import ReadFileTool
+
+    result = await ReadFileTool().execute(
+        path="escape/secret.txt", workspaces=[{"path": str(junction_workspace)}]
+    )
+    assert not result.success
+    assert "outside allowed workspaces" in (result.error or "")

@@ -496,8 +496,11 @@ async def test_dangerous_command_arguments_rejected(
     ],
 )
 async def test_legitimate_developer_commands_allowed(
-    executor, workspaces, mock_runner, binary, args
+    executor, workspaces, mock_runner, binary, args, unix_toolchain
 ):
+    # `unix_toolchain`: on Windows grep/find are optional and refused when absent (see
+    # test_unix_toolchain_binaries_are_not_assumed_on_windows); this test is about the
+    # argument policy, not about what is installed on the machine running it.
     result = await run_tool(executor, "command", {"binary": binary, "args": args}, workspaces)
     assert result.success, result.error
     assert mock_runner.run.call_args.args[:2] == (binary, args)

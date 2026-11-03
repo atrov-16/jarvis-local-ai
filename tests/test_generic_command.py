@@ -14,7 +14,7 @@ def command_tool(runner):
     return GenericCommandTool(runner)
 
 @pytest.mark.asyncio
-async def test_command_allowlist_enforcement(command_tool):
+async def test_command_allowlist_enforcement(command_tool, unix_toolchain):
     # Try forbidden binary
     result = await command_tool.execute(binary="python", args=["--version"], workspaces=[])
     assert not result.success
@@ -53,7 +53,7 @@ async def test_workspace_confinement_args(command_tool, tmp_path):
     assert "escapes workspace" in result.error
 
 @pytest.mark.asyncio
-async def test_network_awareness_metadata(command_tool):
+async def test_network_awareness_metadata(command_tool, unix_toolchain):
     # Mock runner for npm (network-aware)
     from unittest.mock import AsyncMock
 
