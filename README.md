@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-In%20Development-orange)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey)
 
 ---
 
@@ -285,6 +285,47 @@ uv run jarvis task approve <task-id> --step <step-id>
 ```
 
 ---
+
+# Platform support
+
+| Platform | Status |
+|---|---|
+| Windows 11 | Supported. Tested natively (not simulated) locally and on GitHub's `windows-latest` runner. |
+| macOS | Supported. Tested on GitHub's `macos-latest` runner. |
+| Linux | Best effort. The process and path code has a Linux implementation, but Linux is not in the CI matrix. |
+
+Python 3.12 and 3.13 are both run in CI on Windows and macOS (`.github/workflows/ci.yml`).
+
+## Windows specifics
+
+- **Process containment.** Each command runs inside a Windows Job Object, so its whole process
+  tree ends on timeout or cancellation, and if Jarvis itself dies. Orphan recovery identifies a
+  process by PID *and* creation time, and never ends one it cannot positively identify.
+- **Optional Unix toolchain.** `ls`, `grep`, `find`, `make`, `gcc` and `g++` do not ship with
+  Windows. They work if Git for Windows, MSYS2 or MinGW provides them on `PATH`; otherwise
+  Jarvis says so. It never substitutes Windows' unrelated `System32\find.exe`.
+- **Programs and `PATH`.** Programs are looked up only in absolute `PATH` entries, never in the
+  working directory. `.bat` and `.cmd` programs (`npm`, `yarn` and `pnpm` are shipped that way)
+  run through `cmd.exe`, so arguments containing `" & | < > ^ % !` or line breaks are refused.
+- **Text files.** `.env` and TOML config files may be UTF-8 with or without a byte-order mark.
+  UTF-16 (what Windows PowerShell 5.1's `>` writes) is rejected with an error that says how to
+  fix it. `write_file` and `patch_file` preserve a file's existing line endings.
+- **One daemon per database**, enforced by an OS file lock that is released when the process
+  dies. While the lock is held, Windows does not let other processes read the lock file.
+
+## Known limitations
+
+- `grep` skips `.git`, `.jarvis`, `.jarvis_backups`, `.env` and `.env.*` (so also
+  `.env.example`) while searching recursively, and refuses `-R`, `-S`, `--dereference-recursive`
+  and `--`, because following symlinks or ending option parsing would defeat that protection.
+  `find` and `ls` can still list the *names* of protected files.
+- Programs started through `npm`, `cargo`, `make`, `node` and similar execute project code, and
+  that code can read any file the operating system user can. These commands rely on approval,
+  not on path checks.
+- Tests that create symbolic links need Developer Mode or administrator rights on Windows and are
+  skipped without them. NTFS directory junctions need no privilege and are tested.
+- CI fails only if the Ruff or mypy finding counts rise above the committed baseline
+  (`.github/static-analysis-baseline.json`); existing findings remain.
 
 # Security Model
 
