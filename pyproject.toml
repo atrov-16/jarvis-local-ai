@@ -41,6 +41,8 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Dump the stacks of a test that hangs (a hung CI job otherwise says nothing).
+faulthandler_timeout = 240
 testpaths = ["tests"]
 
 [tool.mypy]
