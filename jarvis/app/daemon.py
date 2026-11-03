@@ -10,8 +10,8 @@ from jarvis.api.http import create_app
 from jarvis.api.network import UnsafeBindError, check_bind_host
 from jarvis.app.instance_lock import DaemonAlreadyRunningError, InstanceLock
 from jarvis.config.manager import load_config
-from jarvis.storage.connection import resolve_database_path
 from jarvis.logging.setup import setup_logging, uvicorn_log_config
+from jarvis.storage.connection import resolve_database_path
 
 
 def run_daemon(config_path: Path | None = None) -> None:
