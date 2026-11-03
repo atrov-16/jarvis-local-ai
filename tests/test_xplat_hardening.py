@@ -51,7 +51,8 @@ def test_lock_is_held_across_processes_and_released_when_the_holder_dies(tmp_pat
             sys.executable, "-c",
             "import time; from pathlib import Path; "
             "from jarvis.app.instance_lock import InstanceLock; "
-            f"lock = InstanceLock(Path({str(database)!r})); lock.acquire(); print('locked', flush=True); "
+            f"lock = InstanceLock(Path({str(database)!r})); lock.acquire(); "
+            "print('locked', flush=True); "
             "time.sleep(60)",
         ],
         stdout=subprocess.PIPE,
@@ -205,7 +206,9 @@ def test_cli_never_connects_to_a_wildcard_address(tmp_path, host, expected):
     from jarvis.app.terminal import _get_api_client
 
     config = tmp_path / "c.toml"
-    config.write_text(f'[server]\nhost = "{host}"\nport = 8765\n[security]\nlocalhost_only = false\n')
+    config.write_text(
+        f'[server]\nhost = "{host}"\nport = 8765\n[security]\nlocalhost_only = false\n'
+    )
     with _get_api_client(config) as client:
         assert str(client.base_url).rstrip("/") == expected
 
@@ -237,14 +240,14 @@ def test_workspace_add_sends_an_absolute_path(tmp_path, monkeypatch):
     (tmp_path / "proj").mkdir()
     result = CliRunner().invoke(terminal.app, ["workspace", "add", "proj"])
     assert result.exit_code == 0, result.output
-    assert Path(sent["path"]) == (tmp_path / "proj").resolve() or Path(sent["path"]) == (
-        tmp_path / "proj"
-    )
+    assert Path(sent["path"]) in {(tmp_path / "proj").resolve(), tmp_path / "proj"}
     assert Path(sent["path"]).is_absolute()
 
 
 def test_published_placeholder_token_is_not_accepted():
-    placeholder = SecretManager(env={"JARVIS_API_TOKEN": "change-me-local-token"}, use_keyring=False)
+    placeholder = SecretManager(
+        env={"JARVIS_API_TOKEN": "change-me-local-token"}, use_keyring=False
+    )
     assert placeholder.get_api_token() is None
     real = SecretManager(env={"JARVIS_API_TOKEN": "a-real-token"}, use_keyring=False)
     assert real.get_api_token() == "a-real-token"

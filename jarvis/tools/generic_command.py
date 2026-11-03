@@ -68,9 +68,11 @@ def unsupported_on_this_platform(binary: str, search_path: str | None) -> str | 
         return None  # Elsewhere a missing program is reported by the runner.
     found = find_executable(binary, search_path)
     system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or ""
-    in_windows_dir = bool(found and system_root) and os.path.normcase(found).startswith(
-        os.path.normcase(system_root.rstrip("\\") + "\\")
-    )
+    if found is None:
+        in_windows_dir = False
+    else:
+        windows_dir = os.path.normcase(system_root.rstrip("\\") + "\\")
+        in_windows_dir = bool(system_root) and os.path.normcase(found).startswith(windows_dir)
     if found is None or in_windows_dir:
         return (
             f"'{binary}' is not available on this Windows installation. It is part of an "

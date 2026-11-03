@@ -104,13 +104,15 @@ class GitTool(BaseTool):
         # Branch detection
         branch_res = await self._git(["branch", "--show-current"], cwd, task_id)
         if branch_res.exit_code != 0:
-            return ToolResult(success=False, error=f"Git status failed: {branch_res.stderr.strip()}")
+            error = f"Git status failed: {branch_res.stderr.strip()}"
+            return ToolResult(success=False, error=error)
         branch = branch_res.stdout.strip() or "DETACHED"
 
         # Porcelain status for counts
         status_res = await self._git(["status", "--porcelain=v1"], cwd, task_id)
         if status_res.exit_code != 0:
-            return ToolResult(success=False, error=f"Git status failed: {status_res.stderr.strip()}")
+            error = f"Git status failed: {status_res.stderr.strip()}"
+            return ToolResult(success=False, error=error)
         lines = status_res.stdout.splitlines()
         
         modified = 0
