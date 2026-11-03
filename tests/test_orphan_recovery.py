@@ -28,11 +28,15 @@ async def test_recover_no_running_processes(orphan_service: OrphanRecoveryServic
 
 
 @pytest.mark.asyncio
+@patch("jarvis.core.process_utils.is_process_running", return_value=False)
+@patch("jarvis.core.process_utils.is_identity_unverifiable", return_value=False)
 @patch("jarvis.core.orphan_recovery.OrphanRecoveryService._is_orphaned")
 @patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate")
 async def test_recover_running_not_orphaned(
     mock_terminate: MagicMock,
     mock_is_orphaned: MagicMock,
+    mock_unverifiable: MagicMock,
+    mock_running: MagicMock,
     orphan_service: OrphanRecoveryService,
     mock_registry: AsyncMock
 ) -> None:
@@ -112,3 +116,114 @@ def test_record_without_creation_time_is_never_terminated(
 ) -> None:
     # Without a creation time the PID cannot be told apart from an unrelated process.
     assert orphan_service._is_orphaned(1234, "test", None) is False
+
+
+# --- Records that must not be discarded ------------------------------------------------------
+
+
+def _running_record(**overrides):
+    record = {
+        "id": "9", "status": "running", "pid": 4242, "task_id": "t9",
+        "command_display": "test", "creation_time": 100.0,
+    }
+    record.update(overrides)
+    return record
+
+
+@pytest.mark.asyncio
+@patch("jarvis.core.process_utils.is_process_running", return_value=True)
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate")
+async def test_live_process_without_creation_time_keeps_its_record(
+    mock_terminate: MagicMock,
+    mock_running: MagicMock,
+    orphan_service: OrphanRecoveryService,
+    mock_registry: AsyncMock,
+) -> None:
+    mock_registry.list_processes.return_value = [_running_record(creation_time=None)]
+    assert await orphan_service.recover() == []
+    mock_terminate.assert_not_called()
+    mock_registry.unregister_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("jarvis.core.process_utils.is_process_running", return_value=False)
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate")
+async def test_dead_process_without_creation_time_is_cleaned_up(
+    mock_terminate: MagicMock,
+    mock_running: MagicMock,
+    orphan_service: OrphanRecoveryService,
+    mock_registry: AsyncMock,
+) -> None:
+    mock_registry.list_processes.return_value = [_running_record(creation_time=None)]
+    assert await orphan_service.recover() == []
+    mock_registry.unregister_process.assert_called_once_with("9")
+
+
+@pytest.mark.asyncio
+@patch("jarvis.core.process_utils.is_identity_unverifiable", return_value=True)
+@patch("jarvis.core.process_utils.is_same_process", return_value=False)
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate")
+async def test_process_the_os_will_not_identify_keeps_its_record(
+    mock_terminate: MagicMock,
+    mock_same: MagicMock,
+    mock_unverifiable: MagicMock,
+    orphan_service: OrphanRecoveryService,
+    mock_registry: AsyncMock,
+) -> None:
+    # e.g. access denied while reading the creation time of a live process.
+    mock_registry.list_processes.return_value = [_running_record()]
+    assert await orphan_service.recover() == []
+    mock_terminate.assert_not_called()
+    mock_registry.unregister_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate", return_value=False)
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._is_orphaned", return_value=True)
+async def test_failed_termination_keeps_the_record_and_reports_no_task(
+    mock_is_orphaned: MagicMock,
+    mock_terminate: MagicMock,
+    orphan_service: OrphanRecoveryService,
+    mock_registry: AsyncMock,
+) -> None:
+    mock_registry.list_processes.return_value = [_running_record()]
+    assert await orphan_service.recover() == []
+    mock_registry.unregister_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("jarvis.core.process_utils.is_process_running", return_value=True)
+@patch("jarvis.core.process_utils.is_identity_unverifiable", return_value=False)
+@patch("jarvis.core.process_utils.is_same_process", return_value=False)
+@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._terminate")
+async def test_provably_reused_pid_is_cleaned_up_without_a_kill(
+    mock_terminate: MagicMock,
+    mock_same: MagicMock,
+    mock_unverifiable: MagicMock,
+    mock_running: MagicMock,
+    orphan_service: OrphanRecoveryService,
+    mock_registry: AsyncMock,
+) -> None:
+    mock_registry.list_processes.return_value = [_running_record()]
+    assert await orphan_service.recover() == []
+    mock_terminate.assert_not_called()
+    mock_registry.unregister_process.assert_called_once_with("9")
+
+
+@patch("jarvis.core.orphan_recovery._EXIT_POLL_INTERVAL", 0)
+@patch("jarvis.core.process_utils.is_process_running", side_effect=[True, True, False])
+@patch("jarvis.core.process_utils.terminate_process_tree")
+def test_terminate_waits_until_the_process_is_gone(
+    mock_kill: MagicMock, mock_running: MagicMock, orphan_service: OrphanRecoveryService
+) -> None:
+    assert orphan_service._terminate(1234) is True
+
+
+@patch("jarvis.core.orphan_recovery._EXIT_POLL_INTERVAL", 0)
+@patch("jarvis.core.orphan_recovery._EXIT_POLLS", 3)
+@patch("jarvis.core.process_utils.is_process_running", return_value=True)
+@patch("jarvis.core.process_utils.terminate_process_tree", side_effect=OSError("denied"))
+def test_terminate_reports_failure_when_the_process_survives(
+    mock_kill: MagicMock, mock_running: MagicMock, orphan_service: OrphanRecoveryService
+) -> None:
+    assert orphan_service._terminate(1234) is False
