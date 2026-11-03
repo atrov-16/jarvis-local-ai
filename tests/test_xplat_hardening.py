@@ -323,3 +323,35 @@ async def test_read_file_through_a_junction_cannot_leave_the_workspace(junction_
     )
     assert not result.success
     assert "outside allowed workspaces" in (result.error or "")
+
+
+# --- NTFS 8.3 short-name aliases of protected entries --------------------------------------
+
+
+def _short_name(path: Path) -> str | None:
+    """The 8.3 alias of an existing path, or None if the volume has none for it."""
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(520)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 520)  # type: ignore[attr-defined]
+    if not length:
+        return None
+    alias = Path(buffer.value).name
+    return alias if alias.casefold() != path.name.casefold() else None
+
+
+@windows_only
+@pytest.mark.parametrize("protected", [".git", ".env", ".jarvis_backups"])
+@pytest.mark.parametrize("child", ["", "/config", "/not-created-yet.txt"])
+def test_8dot3_alias_of_a_protected_entry_is_denied(tmp_path, protected, child):
+    entry = tmp_path / protected
+    if protected == ".env":
+        entry.write_text("K=1")
+    else:
+        entry.mkdir()
+        (entry / "config").write_text("c")
+    alias = _short_name(entry)
+    if alias is None:
+        pytest.skip("8.3 short-name generation is disabled on this volume")
+    with pytest.raises(PermissionError):
+        authorize_path(alias + child, [{"path": str(tmp_path)}])

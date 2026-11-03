@@ -324,6 +324,11 @@ Python 3.12 and 3.13 are both run in CI on Windows and macOS (`.github/workflows
   not on path checks.
 - Tests that create symbolic links need Developer Mode or administrator rights on Windows and are
   skipped without them. NTFS directory junctions need no privilege and are tested.
+- Jarvis does not back up the database before applying a schema migration. Each migration is
+  atomic (it commits fully or rolls back), but a migration that already committed cannot be
+  undone. Before upgrading, stop the daemon and copy `memory.sqlite` together with any
+  `memory.sqlite-wal` and `memory.sqlite-shm` files. On Windows these files are locked while
+  the daemon runs, so copy them only after it has stopped.
 - CI fails only if the Ruff or mypy finding counts rise above the committed baseline
   (`.github/static-analysis-baseline.json`); existing findings remain.
 
