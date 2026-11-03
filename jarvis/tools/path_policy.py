@@ -8,6 +8,7 @@ because Windows and default macOS filesystems are case-insensitive.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,10 @@ def protected_segment(authorized: AuthorizedPath) -> str | None:
     """Return the protected segment of the path, if any."""
     for part in authorized.path.relative_to(authorized.root).parts:
         name = part.casefold()
+        if sys.platform == "win32":
+            # Win32 ignores trailing dots and spaces and an NTFS stream suffix
+            # (".env::$DATA", ".git."), so those spellings name the protected entry too.
+            name = name.split(":", 1)[0].rstrip(" .")
         if name in PROTECTED_DIR_NAMES:
             return part
         if name == ".env" or (name.startswith(".env.") and name not in ENV_TEMPLATE_NAMES):
@@ -69,6 +74,10 @@ def protected_segment(authorized: AuthorizedPath) -> str | None:
 def authorize_path(path_str: str, workspaces: list[dict[str, Any]]) -> AuthorizedPath:
     """Resolve inside a workspace and reject protected content (secrets, VCS, Jarvis data)."""
     authorized = resolve_in_workspace(path_str, workspaces)
+    if sys.platform == "win32" and any(
+        ":" in part for part in authorized.path.relative_to(authorized.root).parts
+    ):
+        raise ProtectedPathError("Access Denied: alternate data streams are not accessible.")
     segment = protected_segment(authorized)
     if segment is not None:
         raise ProtectedPathError(f"Access Denied: '{segment}' is a protected system path.")

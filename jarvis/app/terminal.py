@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -27,6 +29,21 @@ workspace_app = typer.Typer(help="Workspace management.")
 project_app = typer.Typer(help="Project management.")
 memory_app = typer.Typer(help="Memory management.")
 task_app = typer.Typer(help="Task execution and planning.")
+
+
+def _use_utf8_output() -> None:
+    # Redirected output on Windows defaults to the ANSI code page, which cannot encode the
+    # box-drawing characters Rich prints.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+_use_utf8_output()
 console = Console()
 
 
@@ -34,6 +51,8 @@ def _get_api_client(config_path: Path | None = None) -> httpx.Client:
     jarvis_config = load_config(config_path)
     secret_manager = SecretManager()
     host = jarvis_config.server.host
+    # A wildcard bind address is not a destination (Windows refuses to connect to it).
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1", "[::]": "[::1]"}.get(host, host)
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # IPv6 literal, e.g. ::1
     base_url = f"http://{host}:{jarvis_config.server.port}"
@@ -41,7 +60,9 @@ def _get_api_client(config_path: Path | None = None) -> httpx.Client:
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(base_url=base_url, headers=headers, timeout=10.0)
+    # trust_env=False: the daemon is on this computer, so a system/environment HTTP proxy
+    # (common on corporate Windows machines) must never be used to reach it.
+    return httpx.Client(base_url=base_url, headers=headers, timeout=10.0, trust_env=False)
 
 
 def _handle_api_error(e: Exception) -> None:
@@ -128,9 +149,11 @@ def workspace_add(
     config: Path | None = typer.Option(None, "--config", "-c"),
 ) -> None:
     """Register a new workspace."""
+    # Resolved here: the daemon's working directory is unrelated to the user's.
+    path = os.path.abspath(os.path.expanduser(path))
     if not name:
         name = Path(path).name
-    
+
     with _get_api_client(config) as client:
         try:
             resp = client.post("/v1/workspaces", json={"name": name, "path": path})

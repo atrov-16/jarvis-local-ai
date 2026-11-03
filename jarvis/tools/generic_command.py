@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from jarvis.tasks.command_runner import MAX_COMMAND_TIMEOUT, CommandRunner
+from jarvis.tasks.command_runner import (
+    MAX_COMMAND_TIMEOUT,
+    CommandRunner,
+    find_executable,
+)
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
 from jarvis.tools.path_policy import authorize_path, resolve_in_workspace
 
@@ -39,6 +45,40 @@ ALLOWED_BINARIES: dict[str, AllowedBinary] = {
     "find": AllowedBinary("find", has_network_access=False),
     "ls": AllowedBinary("ls", has_network_access=False),
 }
+
+
+# Platform support. All of these are allowlisted everywhere, but whether the program exists
+# differs, and Jarvis never installs or emulates a Unix toolchain:
+#
+#   node npm yarn pnpm cargo go cmake   Same on Windows and macOS: run if installed (they ship
+#                                       as .exe / .cmd shims on Windows).
+#   ls grep find                        macOS: always present. Windows: not part of Windows. An
+#                                       optional Unix toolchain (Git for Windows, MSYS2,
+#                                       uutils) can provide them; the unrelated Windows
+#                                       System32 `find.exe` / `findstr` is never used for them.
+#   make gcc g++                        macOS: present with the Xcode Command Line Tools (gcc
+#                                       and g++ are clang). Windows: optional toolchain (MinGW,
+#                                       MSYS2, Chocolatey), never assumed.
+WINDOWS_OPTIONAL_TOOLCHAIN: frozenset[str] = frozenset({"ls", "grep", "find", "make", "gcc", "g++"})
+
+
+def unsupported_on_this_platform(binary: str, search_path: str | None) -> str | None:
+    """A clear explanation if `binary` cannot be used here, else None."""
+    if sys.platform != "win32" or binary not in WINDOWS_OPTIONAL_TOOLCHAIN:
+        return None  # Elsewhere a missing program is reported by the runner.
+    found = find_executable(binary, search_path)
+    system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or ""
+    in_windows_dir = bool(found and system_root) and os.path.normcase(found).startswith(
+        os.path.normcase(system_root.rstrip("\\") + "\\")
+    )
+    if found is None or in_windows_dir:
+        return (
+            f"'{binary}' is not available on this Windows installation. It is part of an "
+            f"optional Unix toolchain (for example Git for Windows, MSYS2 or MinGW) that is not "
+            f"installed or not on PATH; Jarvis does not substitute the Windows program of the "
+            f"same name."
+        )
+    return None
 
 
 # Arguments that turn an allowlisted developer tool into a general code-execution or
@@ -148,6 +188,10 @@ class GenericCommandTool(BaseTool):
                         authorize_path(candidate, workspaces)
                     except (PermissionError, ValueError) as e:
                         return ToolResult(success=False, error=f"Security Error: Argument {i+1} ('{arg}') escapes workspace: {e}")
+
+            unsupported = unsupported_on_this_platform(binary_name, os.environ.get("PATH"))
+            if unsupported:
+                return ToolResult(success=False, error=f"Unsupported command: {unsupported}")
 
             # 5. Determine Timeout
             timeout = kwargs.get("timeout") or allowed.default_timeout

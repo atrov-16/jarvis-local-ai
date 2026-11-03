@@ -78,11 +78,11 @@ async def test_patch_file_tool_rollback_on_verification_failure(tmp_path, monkey
     
     # Mock the write_text to something that doesn't include the replacement
     # to trigger verification failure
-    original_write = Path.write_text
-    def sabotaged_write(self, content, encoding=None):
-        return original_write(self, "sabotaged content", encoding=encoding)
-    
-    monkeypatch.setattr(Path, "write_text", sabotaged_write)
+    original_write = Path.write_bytes
+    def sabotaged_write(self, data):
+        return original_write(self, b"sabotaged content")
+
+    monkeypatch.setattr(Path, "write_bytes", sabotaged_write)
     
     # Execute
     hunks = [PatchHunkInput(search="world", replace="universe")]
@@ -95,6 +95,5 @@ async def test_patch_file_tool_rollback_on_verification_failure(tmp_path, monkey
     assert not result.success
     assert "Verification failed" in result.error
     # Check if rollback restored original content
-    monkeypatch.undo() # Restore real write_text to read the file correctly if needed, 
-                       # though read_text isn't mocked.
+    monkeypatch.undo()  # Restore the real write_bytes before reading the file back.
     assert file_path.read_text(encoding="utf-8") == "hello\nworld"
