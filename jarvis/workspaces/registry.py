@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from jarvis.storage.unit_of_work import UnitOfWork
@@ -26,18 +27,36 @@ def _system_directories() -> tuple[list[Path], list[Path]]:
     return [p.resolve() for p in no_workspace_inside], [p.resolve() for p in not_a_workspace]
 
 
+def _key(path: Path) -> tuple[str, ...]:
+    """Comparison key: Windows and default macOS volumes are case-insensitive, and a
+    Windows extended-length prefix (\\\\?\\C:\\...) names the same location as the plain path."""
+    text = str(path)
+    if sys.platform == "win32":
+        if text.startswith("\\\\?\\UNC\\"):
+            text = "\\\\" + text[8:]
+        elif text.startswith(("\\\\?\\", "\\\\.\\")):
+            text = text[4:]
+    parts = Path(text).parts
+    return tuple(p.casefold() for p in parts) if sys.platform in ("win32", "darwin") else parts
+
+
+def _within(path: Path, directory: Path) -> bool:
+    inner, outer = _key(path), _key(directory)
+    return inner[: len(outer)] == outer
+
+
 def dangerous_root_reason(path: Path) -> str | None:
     """Why `path` (already resolved) must not become a workspace root, if it must not."""
-    if path == Path(path.anchor):
+    if len(_key(path)) <= 1:
         return "a filesystem root"
     home = Path.home().resolve()
-    if path == home or home.is_relative_to(path):
+    if _key(path) == _key(home) or _within(home, path):
         return "the home directory or one of its parents"
     no_workspace_inside, not_a_workspace = _system_directories()
     for system_dir in no_workspace_inside:
-        if path == system_dir or path.is_relative_to(system_dir):
+        if _within(path, system_dir):
             return f"inside system directory {system_dir}"
-    if path in not_a_workspace:
+    if any(_key(path) == _key(d) for d in not_a_workspace):
         return "a top-level system directory"
     return None
 

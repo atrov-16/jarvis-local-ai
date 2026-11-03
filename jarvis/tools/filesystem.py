@@ -48,7 +48,9 @@ class PatchFileTool(BaseTool):
                 return ToolResult(success=False, error=f"Not a file: {path}")
 
             # 1. Read Original
-            original_content = path.read_text(encoding="utf-8")
+            raw = path.read_bytes().decode("utf-8")
+            newline = "\r\n" if "\r\n" in raw else "\n"  # the file's own line ending
+            original_content = raw.replace("\r\n", "\n")
             
             # 2. Create Pre-flight Backup
             backup_path = self._create_backup(path)
@@ -64,13 +66,13 @@ class PatchFileTool(BaseTool):
                 if new_content is None:
                     return ToolResult(success=False, error="Patch engine returned no content.")
                     
-                path.write_text(new_content, encoding="utf-8")
-                
+                path.write_bytes(new_content.replace("\n", newline).encode("utf-8"))
+
                 # 5. Post-application Verification
                 # We re-read and check if all 'replace' blocks are actually present
-                verified_content = path.read_text(encoding="utf-8")
+                verified_content = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
                 for hunk in hunks:
-                    if hunk.replace not in verified_content:
+                    if hunk.replace.replace("\r\n", "\n") not in verified_content:
                         # Rollback
                         self._restore_backup(backup_path, path)
                         return ToolResult(
@@ -212,7 +214,8 @@ class WriteFileTool(BaseTool):
             # Ensure parent directory exists
             path.parent.mkdir(parents=True, exist_ok=True)
             
-            path.write_text(kwargs["content"], encoding="utf-8")
+            # Bytes, so the content is stored exactly as given (no \n -> \r\n on Windows).
+            path.write_bytes(kwargs["content"].encode("utf-8"))
             return ToolResult(success=True, data=f"File written successfully: {path}")
         except Exception as e:
             return ToolResult(success=False, error=str(e))

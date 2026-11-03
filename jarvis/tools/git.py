@@ -103,10 +103,14 @@ class GitTool(BaseTool):
     async def _do_status(self, cwd: Path, task_id: str | None = None) -> ToolResult:
         # Branch detection
         branch_res = await self._git(["branch", "--show-current"], cwd, task_id)
+        if branch_res.exit_code != 0:
+            return ToolResult(success=False, error=f"Git status failed: {branch_res.stderr.strip()}")
         branch = branch_res.stdout.strip() or "DETACHED"
 
         # Porcelain status for counts
         status_res = await self._git(["status", "--porcelain=v1"], cwd, task_id)
+        if status_res.exit_code != 0:
+            return ToolResult(success=False, error=f"Git status failed: {status_res.stderr.strip()}")
         lines = status_res.stdout.splitlines()
         
         modified = 0
@@ -139,7 +143,10 @@ class GitTool(BaseTool):
             args.extend(["--", file_path])
             
         res = await self._git(args, cwd, task_id)
-        
+
+        if res.exit_code != 0:
+            return ToolResult(success=False, error=f"Git diff failed: {res.stderr.strip()}")
+
         if not res.stdout and not res.stderr and res.exit_code == 0:
             return ToolResult(success=True, data={"diff": "", "message": "No changes found."})
             

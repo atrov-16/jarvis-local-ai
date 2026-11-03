@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from jarvis.config.models import JarvisConfig
+from jarvis.config.paths import expand_path
 
 CONFIG_PATH_ENV = "JARVIS_CONFIG_PATH"
 
@@ -16,7 +17,10 @@ def load_config(path: str | Path | None = None) -> JarvisConfig:
     """Load Jarvis config from an explicit path, env path, or defaults."""
     config_path = _resolve_config_path(path)
     data: dict[str, Any] = {}
-    if config_path is not None and config_path.exists():
+    if config_path is not None:
+        if not config_path.is_file():
+            # An explicitly named file that is missing is a mistake, not a request for defaults.
+            raise FileNotFoundError(f"Config file not found: {config_path}")
         with config_path.open("rb") as file:
             data = tomllib.load(file)
 
@@ -26,10 +30,10 @@ def load_config(path: str | Path | None = None) -> JarvisConfig:
 
 def _resolve_config_path(path: str | Path | None) -> Path | None:
     if path is not None:
-        return Path(path)
+        return expand_path(path)
     env_path = os.environ.get(CONFIG_PATH_ENV)
     if env_path:
-        return Path(env_path)
+        return expand_path(env_path)
     return None
 
 

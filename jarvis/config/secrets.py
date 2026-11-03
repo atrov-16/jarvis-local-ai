@@ -13,6 +13,8 @@ JARVIS_SERVICE = "Jarvis"
 API_TOKEN_ENV = "JARVIS_API_TOKEN"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 API_TOKEN_ACCOUNT = "API Token"
+# Example values that shipped in .env.example: public, so never accepted as real secrets.
+PUBLISHED_PLACEHOLDER_SECRETS = frozenset({"change-me-local-token"})
 OPENROUTER_ACCOUNT = "OpenRouter"
 
 
@@ -75,7 +77,7 @@ class SecretManager:
 
     def _get_secret(self, env_name: str, account: str) -> str | None:
         value = self._env.get(env_name)
-        if value:
+        if value and value not in PUBLISHED_PLACEHOLDER_SECRETS:
             return value
         if not self._use_keyring:
             return None
