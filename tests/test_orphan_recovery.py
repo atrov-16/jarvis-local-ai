@@ -89,21 +89,26 @@ def test_is_orphaned_process_missing(mock_get_ctime: MagicMock, orphan_service: 
     mock_get_ctime.assert_called_with(1234)
 
 @patch("jarvis.core.process_utils.get_process_creation_time")
-@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._is_orphaned_windows")
-@patch("jarvis.core.orphan_recovery.OrphanRecoveryService._is_orphaned_unix")
-@patch("jarvis.core.orphan_recovery.os")
 def test_is_orphaned_process_matched(
-    mock_os: MagicMock,
-    mock_unix: MagicMock,
-    mock_windows: MagicMock,
-    mock_get_ctime: MagicMock, 
-    orphan_service: OrphanRecoveryService
+    mock_get_ctime: MagicMock, orphan_service: OrphanRecoveryService
 ) -> None:
-    # Recorded time is 100.0. Actual time is 102.0 (<= 5s difference).
-    mock_get_ctime.return_value = 102.0
-    mock_os.name = "nt"
-    mock_windows.return_value = True
-    
-    result = orphan_service._is_orphaned(1234, "test", recorded_creation_time=100.0)
-    assert result is True
-    mock_windows.assert_called_with(1234, "test")
+    # Recorded 100.0, observed 100.01: the same process (identical native source).
+    mock_get_ctime.return_value = 100.01
+    assert orphan_service._is_orphaned(1234, "test", recorded_creation_time=100.0) is True
+
+
+@patch("jarvis.core.process_utils.is_process_running", return_value=True)
+@patch("jarvis.core.process_utils.get_process_creation_time", return_value=102.0)
+def test_two_seconds_apart_is_a_different_process(
+    mock_get_ctime: MagicMock, mock_running: MagicMock, orphan_service: OrphanRecoveryService
+) -> None:
+    # The old 5 s tolerance would have treated this reused PID as the original process.
+    assert orphan_service._is_orphaned(1234, "test", recorded_creation_time=100.0) is False
+
+
+@patch("jarvis.core.process_utils.is_process_running", return_value=True)
+def test_record_without_creation_time_is_never_terminated(
+    mock_running: MagicMock, orphan_service: OrphanRecoveryService
+) -> None:
+    # Without a creation time the PID cannot be told apart from an unrelated process.
+    assert orphan_service._is_orphaned(1234, "test", None) is False

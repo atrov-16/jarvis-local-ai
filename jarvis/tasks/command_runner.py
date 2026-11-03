@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import signal
+import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from jarvis.core.process_registry import ProcessRegistryService
@@ -20,6 +20,8 @@ LOG = logging.getLogger(__name__)
 
 # Windows CREATE_NEW_PROCESS_GROUP, so taskkill /T can target the child's tree.
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
+# Windows CREATE_SUSPENDED: the child joins its job object before it runs any code.
+_CREATE_SUSPENDED = 0x00000004
 
 
 def _is_windows() -> bool:
@@ -31,9 +33,11 @@ def _spawn_isolation_kwargs() -> dict[str, object]:
 
     The child must never share the daemon's process group: termination signals the
     whole group, and a shared group would take the daemon (or test runner) with it.
+    On Windows the child is also created suspended, so that `_contain` can place it in a
+    job object before it can start descendants of its own.
     """
     if _is_windows():
-        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED}
     # setsid() in the child: it becomes leader of a new session and process group
     # whose id equals its pid.
     return {"start_new_session": True}
@@ -82,28 +86,93 @@ def _child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
 # arguments. Rejected outright: batch-file argument escaping cannot be made safe.
 _BATCH_UNSAFE_CHARS = frozenset('"&|<>^%!\r\n')
 
+# Programs CreateProcess starts directly (.exe, .com) or through cmd.exe (.bat, .cmd).
+_WINDOWS_PROGRAM_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
+_WINDOWS_BATCH_SUFFIXES = (".bat", ".cmd")
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
 
-def _resolve_executable(cmd: str, args: list[str]) -> str:
-    """Resolve the program to launch.
+
+class ExecutableNotFoundError(FileNotFoundError):
+    """The program is not installed, or not on the PATH Jarvis passes to commands."""
+
+
+def find_executable(name: str, search_path: str | None) -> str | None:
+    """Locate program `name` on `search_path` (a PATH value), never in the working directory.
+
+    Only absolute PATH entries are searched. An empty or relative entry, and on Windows the
+    implicit current-directory lookup of CreateProcess and `shutil.which`, would make the
+    result depend on Jarvis's working directory, where a workspace could plant a program of
+    the same name. On Windows only .exe, .com, .bat and .cmd files qualify, tried in
+    PATHEXT order within each directory.
+    """
+    if not search_path:
+        return None
+    directories = []
+    for entry in search_path.split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if entry and os.path.isabs(entry):
+            directories.append(entry)
+
+    if not _is_windows():
+        for directory in directories:
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix:
+        names = [name] if suffix in _WINDOWS_PROGRAM_SUFFIXES else []
+    else:
+        pathext = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT
+        extensions = [e.lower() for e in pathext.split(";") if e.strip()]
+        names = [name + e for e in extensions if e in _WINDOWS_PROGRAM_SUFFIXES]
+    for directory in directories:
+        for candidate_name in names:
+            candidate = os.path.join(directory, candidate_name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _resolve_executable(cmd: str, args: list[str], search_path: str | None = None) -> str:
+    """Resolve the program to launch to an absolute path.
+
+    A bare name is looked up on the child's PATH (see `find_executable`); a missing program
+    raises ExecutableNotFoundError with a clear message instead of a bare OS error. Callers
+    that pass a path (a virtualenv interpreter, sys.executable) must pass an absolute one.
 
     On Windows, CreateProcess only appends `.exe`, so `npm`, `yarn` and `pnpm` (shipped
-    as `.cmd` shims) are not found by name. Resolve through PATH/PATHEXT instead. A
-    batch target is run by cmd.exe, which re-parses its arguments, so arguments with
-    shell metacharacters are refused rather than escaped.
+    as `.cmd` shims) are only found through PATHEXT. A batch target is run by cmd.exe,
+    which re-parses its command line, so arguments with shell metacharacters are refused
+    rather than escaped.
     """
-    if not _is_windows():
-        return cmd
-    resolved = shutil.which(cmd)
-    if resolved is None:
-        return cmd
-    if Path(resolved).suffix.lower() in (".cmd", ".bat"):
-        for arg in args:
-            if any(ch in _BATCH_UNSAFE_CHARS for ch in arg):
-                raise ValueError(
-                    f"Argument {arg!r} contains characters that are unsafe for batch "
-                    f"program {Path(resolved).name}."
-                )
-    return resolved
+    if os.path.dirname(cmd):
+        if not os.path.isabs(cmd):
+            raise ValueError(f"Program path {cmd!r} must be absolute.")
+        program = cmd
+    else:
+        if search_path is None:
+            search_path = os.environ.get("PATH")
+        found = find_executable(cmd, search_path)
+        if found is None:
+            raise ExecutableNotFoundError(
+                f"Program '{cmd}' was not found on PATH; it may not be installed."
+            )
+        program = found
+
+    if _is_windows():
+        suffix = Path(program).suffix.lower()
+        if suffix not in _WINDOWS_PROGRAM_SUFFIXES:
+            raise ValueError(f"'{program}' is not a Windows program (.exe, .com, .bat or .cmd).")
+        if suffix in _WINDOWS_BATCH_SUFFIXES:
+            for value in (program, *args):
+                if any(ch in _BATCH_UNSAFE_CHARS for ch in value):
+                    raise ValueError(
+                        f"Argument {value!r} contains characters that are unsafe for batch "
+                        f"program {Path(program).name}."
+                    )
+    return program
 
 
 @dataclass(frozen=True)
@@ -169,36 +238,36 @@ class CommandRunner:
         
         # 1. Prepare Environment: allowlisted variables only (no inherited secrets)
         process_env = _child_environment(env)
-        program = _resolve_executable(cmd, args)
+        program = _resolve_executable(cmd, args, process_env.get("PATH"))
 
         # 2. Start Process
-        # The child gets its own session/process group (POSIX) or process group (Windows)
-        # so the entire child tree can be terminated without touching Jarvis itself.
+        # The child gets its own session/process group (POSIX) or job object (Windows), so
+        # the entire child tree can be terminated without touching Jarvis itself.
         # shell=False always.
-        process = await asyncio.create_subprocess_exec(
-            program,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(cwd),
-            env=process_env,
-            **_spawn_isolation_kwargs(),  # type: ignore[arg-type]
-        )
+        process, job = await self._start(program, args, cwd, process_env)
 
         process_id = str(uuid.uuid4())
         command_display = f"{cmd} {' '.join(args)}"
         
         if self._process_registry and task_id:
             from jarvis.core.process_utils import get_process_creation_time
-            creation_time = get_process_creation_time(process.pid)
-            
-            await self._process_registry.register_process(
-                id=process_id,
-                pid=process.pid,
-                task_id=task_id,
-                command_display=command_display,
-                creation_time=creation_time,
-            )
+
+            try:
+                # The creation time lets orphan recovery tell this process apart from an
+                # unrelated one that reuses the PID after a crash.
+                await self._process_registry.register_process(
+                    id=process_id,
+                    pid=process.pid,
+                    task_id=task_id,
+                    command_display=command_display,
+                    creation_time=get_process_creation_time(process.pid),
+                )
+            except BaseException:
+                # Never leave an unregistered child running.
+                self._terminate_process(process, job)
+                await self._reap(process)
+                self._release(process, job)
+                raise
 
         timeout_occurred = False
         stdout_data = b""
@@ -220,26 +289,30 @@ class CommandRunner:
             timeout_occurred = True
             LOG.warning(f"Command '{cmd}' timed out after {timeout}s. Terminating process group.")
             # Terminate first: a registry failure must never leave the child running.
-            self._terminate_process(process)
+            self._terminate_process(process, job)
             await self._safe_update_status(process_id, task_id, "timed_out")
             # Try to grab whatever was in the pipes
             try:
-                stdout_data, stderr_data = await asyncio.wait_for(process.communicate(), timeout=2.0)
+                stdout_data, stderr_data = await asyncio.wait_for(
+                    process.communicate(), timeout=2.0
+                )
             except Exception:
                 pass
         except asyncio.CancelledError:
             LOG.warning(f"Command '{cmd}' cancelled. Terminating process group.")
-            self._terminate_process(process)
+            self._terminate_process(process, job)
             await self._reap(process)
             await self._safe_update_status(process_id, task_id, "terminated")
             raise
         except Exception as e:
             LOG.exception(f"Unexpected error during command execution: {e}")
-            self._terminate_process(process)
+            self._terminate_process(process, job)
             await self._reap(process)
             await self._safe_update_status(process_id, task_id, "terminated")
             raise
         finally:
+            # Descendants the command left behind never outlive it.
+            self._release(process, job)
             if self._process_registry and task_id:
                 try:
                     await self._process_registry.unregister_process(process_id)
@@ -274,18 +347,61 @@ class CommandRunner:
         except Exception:
             pass
 
-    def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+    @staticmethod
+    async def _start(
+        program: str, args: list[str], cwd: Path, env: dict[str, str]
+    ) -> tuple[asyncio.subprocess.Process, Any]:
+        """Start the child isolated from Jarvis: its own process group, and on Windows
+        its own kill-on-close job object (returned; None elsewhere)."""
+        process = await asyncio.create_subprocess_exec(
+            program,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd),
+            env=env,
+            **_spawn_isolation_kwargs(),  # type: ignore[arg-type]
+        )
+        job = _contain(process) if _is_windows() else None
+        return process, job
+
+    def _release(self, process: asyncio.subprocess.Process, job: Any) -> None:
+        """After the command ended, terminate descendants still in its group or job."""
+        if job is not None:
+            job.close()  # Kill-on-close: anything still in the job ends with it.
+            return
+        if _is_windows() or sys.platform == "win32":
+            return
+        pgid = process.pid
+        if process.returncode is None or pgid == os.getpgrp():
+            return
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # The group is already empty.
+
+    def _terminate_process(self, process: asyncio.subprocess.Process, job: Any = None) -> None:
         """Terminate the child and its descendants, never Jarvis's own process group.
 
         Safe to call repeatedly and after the child has already exited.
         """
         if _is_windows():
-            if process.returncode is None:
+            if job is not None and not job.closed:
+                # The job holds the whole tree, including descendants whose parent exited.
+                try:
+                    job.terminate()
+                except OSError as e:
+                    LOG.debug(f"Failed to terminate job of process {process.pid}: {e}")
+            elif process.returncode is None:
                 import subprocess
+
+                from jarvis.core.process_utils import system32_program
+
                 subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True
+                    [system32_program("taskkill.exe"), "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
                 )
-        else:
+        elif sys.platform != "win32":
             # The child was started with start_new_session=True, so its process group id
             # equals its pid. Signal that group directly instead of looking it up: if the
             # child has exited, getpgid() could fail or, worse, describe a different process.
@@ -308,3 +424,36 @@ class CommandRunner:
                 pass
             except Exception as e:
                 LOG.debug(f"Failed to kill process {process.pid}: {e}")
+
+
+def _contain(process: asyncio.subprocess.Process) -> Any:
+    """Windows: place a just-created, suspended child in a kill-on-close job, then resume it.
+
+    Descendants inherit the job, so terminating the job ends the whole tree, and if Jarvis
+    dies Windows closes the job and kills the tree with it. If no job can be created the
+    child still runs; taskkill /T remains the fallback. A child that cannot be resumed is
+    killed: it would otherwise hang until its timeout.
+    """
+    from jarvis.core import _win32
+
+    job: Any = None
+    try:
+        job = _win32.JobObject()
+        job.assign(process.pid)
+    except OSError as e:
+        LOG.warning(f"Could not place process {process.pid} in a job object: {e}")
+        if job is not None:
+            job.close()
+        job = None
+    try:
+        _win32.resume_process(process.pid)
+    except Exception:
+        if job is not None:
+            job.close()
+        else:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        raise
+    return job

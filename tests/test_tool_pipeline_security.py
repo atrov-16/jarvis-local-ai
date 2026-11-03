@@ -542,31 +542,56 @@ async def test_secrets_not_visible_to_real_child_process(monkeypatch, tmp_path):
     assert result.stdout.strip() == "absent"
 
 
-def test_windows_cmd_shim_is_resolved(monkeypatch):
+def _fake_program_dir(tmp_path, *names):
+    """A directory of real (empty) files, standing in for an install directory on PATH."""
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    for name in names:
+        (directory / name).write_text("")
+        (directory / name).chmod(0o755)
+    return str(directory)
+
+
+def test_windows_cmd_shim_is_resolved(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "_is_windows", lambda: True)
-    monkeypatch.setattr(cr.shutil, "which", lambda name: r"C:\nodejs\npm.CMD")
-    assert cr._resolve_executable("npm", ["install", "left-pad"]) == r"C:\nodejs\npm.CMD"
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    path = _fake_program_dir(tmp_path, "npm.cmd")
+    assert cr._resolve_executable("npm", ["install", "left-pad"], path) == str(
+        tmp_path / "bin" / "npm.cmd"
+    )
 
 
 @pytest.mark.parametrize("arg", ["a&calc", "a|b", "%PATH%", 'x"y', "a\nb", "!x!", "a^b"])
-def test_windows_batch_metacharacters_rejected(monkeypatch, arg):
+def test_windows_batch_metacharacters_rejected(monkeypatch, tmp_path, arg):
     monkeypatch.setattr(cr, "_is_windows", lambda: True)
-    monkeypatch.setattr(cr.shutil, "which", lambda name: r"C:\nodejs\npm.cmd")
+    path = _fake_program_dir(tmp_path, "npm.cmd")
     with pytest.raises(ValueError, match="unsafe for batch"):
-        cr._resolve_executable("npm", ["install", arg])
+        cr._resolve_executable("npm", ["install", arg], path)
 
 
-def test_windows_exe_and_unresolved_commands(monkeypatch):
+def test_windows_exe_needs_no_cmd_and_missing_program_is_reported(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "_is_windows", lambda: True)
-    monkeypatch.setattr(cr.shutil, "which", lambda name: r"C:\Git\cmd\git.exe")
-    assert cr._resolve_executable("git", ["log", "a&b"]) == r"C:\Git\cmd\git.exe"  # no cmd.exe
-    monkeypatch.setattr(cr.shutil, "which", lambda name: None)
-    assert cr._resolve_executable("missing", []) == "missing"
+    path = _fake_program_dir(tmp_path, "git.exe")
+    # An .exe is started directly, so shell metacharacters are inert and allowed.
+    assert cr._resolve_executable("git", ["log", "a&b"], path) == str(tmp_path / "bin" / "git.exe")
+    with pytest.raises(cr.ExecutableNotFoundError, match="'missing' was not found on PATH"):
+        cr._resolve_executable("missing", [], path)
 
 
-def test_posix_does_not_rewrite_command(monkeypatch):
+def test_windows_batch_target_path_itself_is_checked(monkeypatch, tmp_path):
+    # The program path is part of the command line cmd.exe re-parses.
+    monkeypatch.setattr(cr, "_is_windows", lambda: True)
+    directory = tmp_path / "a&b"
+    directory.mkdir()
+    (directory / "tool.cmd").write_text("")
+    with pytest.raises(ValueError, match="unsafe for batch"):
+        cr._resolve_executable("tool", [], str(directory))
+
+
+def test_posix_resolves_to_an_absolute_program(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "_is_windows", lambda: False)
-    assert cr._resolve_executable("npm", ["a&b"]) == "npm"
+    path = _fake_program_dir(tmp_path, "npm")
+    assert cr._resolve_executable("npm", ["a&b"], path) == str(tmp_path / "bin" / "npm")
 
 
 # --- Workspace roots ---------------------------------------------------------------------

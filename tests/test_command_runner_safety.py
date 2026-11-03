@@ -212,11 +212,13 @@ def test_posix_spawn_isolation_kwargs(monkeypatch):
 
 def test_windows_spawn_isolation_kwargs(monkeypatch):
     monkeypatch.setattr(cr, "_is_windows", lambda: True)
-    assert cr._spawn_isolation_kwargs() == {"creationflags": 0x00000200}
+    # New process group, and suspended so it joins its job object before running any code.
+    assert cr._spawn_isolation_kwargs() == {"creationflags": 0x00000200 | 0x00000004}
 
 
-def test_windows_termination_uses_taskkill_tree(monkeypatch):
+def test_windows_termination_without_a_job_uses_taskkill_tree(monkeypatch):
     monkeypatch.setattr(cr, "_is_windows", lambda: True)
+    monkeypatch.setenv("SYSTEMROOT", "C:\\Windows")
     taskkill = MagicMock()
     monkeypatch.setattr(subprocess, "run", taskkill)
     killpg = MagicMock()
@@ -226,9 +228,23 @@ def test_windows_termination_uses_taskkill_tree(monkeypatch):
     CommandRunner()._terminate_process(process)
 
     taskkill.assert_called_once()
-    assert taskkill.call_args[0][0] == ["taskkill", "/F", "/T", "/PID", "4321"]
+    command = taskkill.call_args[0][0]
+    assert command[1:] == ["/F", "/T", "/PID", "4321"]
+    # An absolute System32 path: a taskkill.exe earlier on PATH cannot be substituted.
+    assert "System32" in command[0] and command[0].lower().endswith("taskkill.exe")
     killpg.assert_not_called()
     process.kill.assert_called_once()
+
+
+def test_windows_termination_terminates_the_job(monkeypatch):
+    monkeypatch.setattr(cr, "_is_windows", lambda: True)
+    taskkill = MagicMock()
+    monkeypatch.setattr(subprocess, "run", taskkill)
+    job = MagicMock(closed=False)
+    process = MagicMock(pid=4321, returncode=None)
+    CommandRunner()._terminate_process(process, job)
+    job.terminate.assert_called_once()
+    taskkill.assert_not_called()  # the job already holds the whole tree
 
 
 def test_windows_termination_skips_exited_process(monkeypatch):
