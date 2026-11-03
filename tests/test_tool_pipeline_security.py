@@ -503,7 +503,15 @@ async def test_legitimate_developer_commands_allowed(
     # argument policy, not about what is installed on the machine running it.
     result = await run_tool(executor, "command", {"binary": binary, "args": args}, workspaces)
     assert result.success, result.error
-    assert mock_runner.run.call_args.args[:2] == (binary, args)
+    sent_binary, sent_args = mock_runner.run.call_args.args[:2]
+    assert sent_binary == binary
+    if binary == "grep":
+        # grep additionally gets options that skip protected paths (see
+        # test_recursive_command_protection.py); the caller's arguments are all preserved.
+        assert all(arg in sent_args for arg in args)
+        assert any(arg.startswith("--exclude-dir=") for arg in sent_args)
+    else:
+        assert sent_args == args
 
 
 # --- 4. Command containment --------------------------------------------------------------
