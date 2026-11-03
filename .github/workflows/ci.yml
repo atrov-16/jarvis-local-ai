@@ -40,6 +40,11 @@ jobs:
       - name: Full test suite
         run: uv run pytest -ra --junitxml=junit-${{ matrix.os }}-py${{ matrix.python }}.xml
 
+      - name: Annotate failed tests
+        # Surfaces each failing test on the check run (readable without log access).
+        if: always()
+        run: uv run python .github/scripts/junit_annotations.py junit-${{ matrix.os }}-py${{ matrix.python }}.xml
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
