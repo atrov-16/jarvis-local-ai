@@ -179,6 +179,8 @@ async def test_recovery_never_terminates_a_record_without_creation_time(child):
     registry = _Registry([_record(child.pid, None)])
     assert await OrphanRecoveryService(registry).recover() == []
     assert child.poll() is None
+    # It may still be Jarvis's, so the record is kept rather than forgotten.
+    assert registry.unregistered == []
 
 
 async def test_recovery_ignores_records_whose_process_is_gone(child):
@@ -367,3 +369,71 @@ async def test_cmd_shim_runs_with_safe_arguments_and_rejects_unsafe_ones(tmp_pat
     for bad in ("a&calc", "a|b", "%PATH%", "x^y", "!x!"):
         with pytest.raises(ValueError, match="unsafe for batch"):
             await CommandRunner().run("shim", [bad], cwd=tmp_path, env=env)
+
+
+# --- Records that cannot be verified are kept, not discarded -------------------------------
+
+
+async def test_recovery_keeps_the_record_when_the_os_refuses_to_identify_a_live_process(
+    child, monkeypatch
+):
+    created = pu.get_process_creation_time(child.pid)
+
+    def refuse(pid):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(pu, "_creation_time", refuse)
+    registry = _Registry([_record(child.pid, created)])
+    assert await OrphanRecoveryService(registry).recover() == []
+    assert child.poll() is None, "a process that could not be identified was killed"
+    assert registry.unregistered == [], "the record of a live, unidentifiable process was dropped"
+
+
+async def test_recovery_keeps_the_record_when_termination_does_not_work(child, monkeypatch):
+    from jarvis.core import orphan_recovery
+
+    monkeypatch.setattr(pu, "terminate_process_tree", lambda pid: None)  # the kill is a no-op
+    monkeypatch.setattr(orphan_recovery, "_EXIT_POLLS", 3)
+    monkeypatch.setattr(orphan_recovery, "_EXIT_POLL_INTERVAL", 0.01)
+    registry = _Registry([_record(child.pid, pu.get_process_creation_time(child.pid))])
+    assert await OrphanRecoveryService(registry).recover() == []
+    assert child.poll() is None
+    assert registry.unregistered == []
+
+
+def test_identity_is_unverifiable_for_a_live_process_without_a_recorded_time(child):
+    assert pu.is_identity_unverifiable(child.pid, None) is True
+
+
+def test_identity_is_verifiable_when_the_creation_time_can_be_read(child):
+    created = pu.get_process_creation_time(child.pid)
+    assert pu.is_identity_unverifiable(child.pid, created) is False
+    assert pu.is_identity_unverifiable(child.pid, created - 3600) is False  # decided elsewhere
+
+
+def test_identity_is_not_unverifiable_for_a_process_that_is_gone(child):
+    created = pu.get_process_creation_time(child.pid)
+    child.kill()
+    child.wait()
+    assert pu.is_identity_unverifiable(child.pid, None) is False
+    assert pu.is_identity_unverifiable(child.pid, created) is False
+    assert pu.is_identity_unverifiable(-1, None) is False
+
+
+def test_identity_is_unverifiable_when_the_os_refuses_but_the_process_lives(child, monkeypatch):
+    created = pu.get_process_creation_time(child.pid)
+
+    def refuse(pid):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(pu, "_creation_time", refuse)
+    assert pu.is_identity_unverifiable(child.pid, created) is True
+
+
+def test_identity_is_unverifiable_when_the_os_cannot_even_say_if_it_exists(child, monkeypatch):
+    def refuse(pid):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(pu, "_creation_time", refuse)
+    monkeypatch.setattr(pu, "_is_running", refuse)
+    assert pu.is_identity_unverifiable(child.pid, 123.0) is True

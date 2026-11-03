@@ -60,6 +60,32 @@ def is_same_process(pid: int, recorded_creation_time: float) -> bool:
     return actual is not None and abs(actual - recorded_creation_time) <= CREATION_TIME_TOLERANCE
 
 
+def is_identity_unverifiable(pid: int, recorded_creation_time: float | None) -> bool:
+    """True if a process with this PID may still be alive but cannot be identified.
+
+    That is the case when no creation time was recorded for it, or when the operating
+    system refuses to say when the live process was created (for example access denied
+    to another user's or an elevated process on Windows). Such a record must not be
+    discarded: dropping it would forget a process that might still be Jarvis's.
+
+    False when the process is gone, or when its creation time can be read (then
+    `is_same_process` decides whether it is the recorded one).
+    """
+    if pid <= 0:
+        return False
+    if recorded_creation_time is None:
+        return is_process_running(pid)
+    try:
+        _creation_time(pid)
+    except Exception as e:
+        LOG.debug(f"Could not read the creation time of process {pid}: {e}")
+        try:
+            return _is_running(pid)
+        except Exception:
+            return True  # Cannot even tell whether it exists.
+    return False
+
+
 def terminate_process_tree(pid: int) -> None:
     """Forcefully terminate a process Jarvis started earlier, and its descendants.
 
