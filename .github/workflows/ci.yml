@@ -1,0 +1,75 @@
+name: CI
+
+# Native validation on real Windows and macOS runners (no simulated platforms).
+# Each (OS, Python) pair is its own job, so results are reported separately.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Platform
+        run: uv run python -c "import platform, sys; print(platform.platform(), sys.version)"
+
+      - name: Full test suite
+        run: uv run pytest -ra --junitxml=junit-${{ matrix.os }}-py${{ matrix.python }}.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}
+          path: junit-*.xml
+
+  static-analysis:
+    # Ruff and mypy have known existing findings (see .github/static-analysis-baseline.json).
+    # The real counts are always printed; the job fails only if a count rises above the
+    # baseline, so existing debt is neither hidden nor reported as a clean pass.
+    name: static analysis (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Ruff
+        run: uv run python .github/scripts/static_baseline.py ruff
+
+      - name: mypy
+        run: uv run python .github/scripts/static_baseline.py mypy
