@@ -21,11 +21,27 @@ def load_config(path: str | Path | None = None) -> JarvisConfig:
         if not config_path.is_file():
             # An explicitly named file that is missing is a mistake, not a request for defaults.
             raise FileNotFoundError(f"Config file not found: {config_path}")
-        with config_path.open("rb") as file:
-            data = tomllib.load(file)
+        data = _read_toml(config_path)
 
     config = JarvisConfig.model_validate(data)
     return _apply_env_overrides(config)
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    """Parse a TOML file written by any common editor.
+
+    TOML must be UTF-8, but Windows editors often prepend a byte-order mark that tomllib
+    rejects with an unhelpful "Invalid statement (at line 1, column 1)"; `utf-8-sig`
+    accepts files with or without one. CRLF line endings are fine either way.
+    """
+    try:
+        text = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"Config file {path} is not UTF-8 text ({error.reason} at byte {error.start}). "
+            "Re-save it as UTF-8 (Windows PowerShell 5.1's '>' redirection writes UTF-16)."
+        ) from error
+    return tomllib.loads(text)
 
 
 def _resolve_config_path(path: str | Path | None) -> Path | None:

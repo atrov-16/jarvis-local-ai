@@ -9,6 +9,7 @@ import uvicorn
 from jarvis.api.http import create_app
 from jarvis.api.network import UnsafeBindError, check_bind_host
 from jarvis.app.instance_lock import DaemonAlreadyRunningError, InstanceLock
+from jarvis.config.env_file import EnvFileError, load_env_file
 from jarvis.config.manager import load_config
 from jarvis.logging.setup import setup_logging, uvicorn_log_config
 from jarvis.storage.connection import resolve_database_path
@@ -17,11 +18,10 @@ from jarvis.storage.connection import resolve_database_path
 def run_daemon(config_path: Path | None = None) -> None:
     """Start the local FastAPI daemon."""
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-        
+        load_env_file()
+    except EnvFileError as e:
+        raise SystemExit(f"Refusing to start: {e}") from None
+
     config = load_config(config_path)
     try:
         check_bind_host(
