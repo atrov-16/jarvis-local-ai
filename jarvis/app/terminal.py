@@ -14,14 +14,15 @@ from rich.panel import Panel
 from rich.table import Table
 
 from jarvis.app.daemon import run_daemon
+from jarvis.config.env_file import EnvFileError, load_env_file
 from jarvis.config.manager import load_config
 from jarvis.config.secrets import SecretManager
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+    load_env_file()
+except EnvFileError as _env_error:
+    sys.stderr.write(f"Error: {_env_error}\n")
+    raise SystemExit(1) from None
 
 app = typer.Typer(help="Jarvis local assistant.")
 config_app = typer.Typer(help="Configuration commands.")
