@@ -116,3 +116,26 @@ def isolated_host_state(
 
     yield TEST_KEYRING
     TEST_KEYRING.passwords.clear()
+
+
+@pytest.fixture
+def unix_toolchain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make the optional Unix toolchain (ls, grep, find, make, gcc, g++) look installed.
+
+    Windows has none of these, and the command capability policy refuses them when absent
+    (tested in test_xplat_hardening). Tests of the argument and approval policy that run
+    them through a mocked runner use this, so they do not depend on whether Git's Unix
+    tools happen to be on the PATH of the machine running them. A no-op on macOS/Linux,
+    where the real programs exist.
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return
+    from jarvis.tools.generic_command import WINDOWS_OPTIONAL_TOOLCHAIN
+
+    stand_ins = tmp_path / "unix-toolchain"
+    stand_ins.mkdir()
+    for name in WINDOWS_OPTIONAL_TOOLCHAIN:
+        (stand_ins / f"{name}.exe").write_bytes(b"")
+    monkeypatch.setenv("PATH", f"{stand_ins}{os.pathsep}{os.environ.get('PATH', '')}")
