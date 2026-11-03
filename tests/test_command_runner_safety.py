@@ -196,13 +196,15 @@ async def test_registry_failure_does_not_prevent_termination(tmp_path):
 
 async def test_terminate_is_safe_after_exit_and_when_repeated(tmp_path):
     runner = CommandRunner()
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", "pass", **cr._spawn_isolation_kwargs()
-    )
-    await process.wait()
+    # Started the way the runner starts every command (on Windows: suspended, placed in a job
+    # object, then resumed); spawning with the isolation flags alone would leave it suspended.
+    process, job = await runner._start(sys.executable, ["-c", "pass"], tmp_path, dict(os.environ))
+    await asyncio.wait_for(process.wait(), timeout=30)
     # Already exited and reaped: repeated termination must not raise or signal anything else.
-    runner._terminate_process(process)
-    runner._terminate_process(process)
+    runner._terminate_process(process, job)
+    runner._terminate_process(process, job)
+    runner._release(process, job)
+    runner._release(process, job)
 
 
 def test_posix_spawn_isolation_kwargs(monkeypatch):
