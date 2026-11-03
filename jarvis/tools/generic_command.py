@@ -16,7 +16,7 @@ from jarvis.tasks.command_runner import (
     find_executable,
 )
 from jarvis.tools.base import BaseTool, ToolCategory, ToolResult
-from jarvis.tools.path_policy import authorize_path, resolve_in_workspace
+from jarvis.tools.path_policy import PROTECTED_DIR_NAMES, authorize_path, resolve_in_workspace
 
 LOG = logging.getLogger(__name__)
 
@@ -129,6 +129,62 @@ def _path_candidates(arg: str) -> list[str]:
     ]
 
 
+def _case_insensitive_glob(name: str) -> str:
+    """`.env` -> `.[eE][nN][vV]`: protected names are matched case-insensitively (as
+    path_policy does), but grep's --exclude globs are case-sensitive."""
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in name)
+
+
+def _grep_protection_arguments() -> list[str]:
+    """Options that make grep skip the paths the file tools may never read.
+
+    Path arguments are checked one by one, but `grep -r PATTERN .` walks the whole tree
+    below an allowed directory and would print the contents of `.env` or `.git`.
+    """
+    arguments = [f"--exclude-dir={_case_insensitive_glob(n)}" for n in sorted(PROTECTED_DIR_NAMES)]
+    env = _case_insensitive_glob(".env")
+    # `.env.*` also skips the .env.example templates: erring on the side of not reading.
+    arguments += [f"--exclude={env}", f"--exclude={env}.*"]
+    return arguments
+
+
+# Short options that take a value; characters after one of them are that value, not flags.
+_GREP_SHORT_OPTIONS_WITH_VALUE = frozenset("efmABCdD")
+
+
+def _grep_argument_error(args: list[str]) -> str | None:
+    """Why grep may not be run with these arguments, else None."""
+    for arg in args:
+        if arg == "--":
+            # Anything after it is an operand, so the protective options (which must come
+            # last, see _harden_grep_arguments) would stop working. Use -e PATTERN instead.
+            return "the end-of-options marker '--' is not permitted for grep (use -e PATTERN)"
+        if arg.startswith("--"):
+            name = arg.split("=", 1)[0]
+            if len(name) >= 5 and "--dereference-recursive".startswith(name):
+                return f"'{name}' follows symlinks out of the workspace and is not permitted"
+        elif arg.startswith("-") and len(arg) > 1:
+            for flag in arg[1:]:
+                if flag in _GREP_SHORT_OPTIONS_WITH_VALUE:
+                    break
+                if flag in "RS":  # -R: GNU, -S: BSD; both follow symlinks while recursing
+                    return f"'-{flag}' follows symlinks out of the workspace and is not permitted"
+    return None
+
+
+def _harden_grep_arguments(args: list[str]) -> list[str]:
+    """Add the protective options at the start and again at the end.
+
+    The copy at the end wins over any --include the caller passed (the last matching
+    option wins in GNU grep; an exclude always wins in BSD grep). The copy at the start
+    keeps working if the caller's last argument is an option that would otherwise swallow
+    the first protective option as its value; `--line-buffered` is a harmless sacrificial
+    value for that case.
+    """
+    protection = _grep_protection_arguments()
+    return [*protection, *args, "--line-buffered", *protection]
+
+
 class GenericCommandInput(BaseModel):
     binary: str = Field(..., description="The binary to execute (must be on the allowlist).")
     args: list[str] = Field(default_factory=list, description="List of arguments for the command.")
@@ -194,6 +250,13 @@ class GenericCommandTool(BaseTool):
             unsupported = unsupported_on_this_platform(binary_name, os.environ.get("PATH"))
             if unsupported:
                 return ToolResult(success=False, error=f"Unsupported command: {unsupported}")
+
+            # 4b. Recursive search must not read protected files below an allowed directory.
+            if binary_name == "grep":
+                refusal = _grep_argument_error(args)
+                if refusal:
+                    return ToolResult(success=False, error=f"Security Error: {refusal}.")
+                args = _harden_grep_arguments(args)
 
             # 5. Determine Timeout
             timeout = kwargs.get("timeout") or allowed.default_timeout
