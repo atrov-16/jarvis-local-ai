@@ -469,7 +469,7 @@ def create_app(
     async def list_approvals(_: None = Depends(require_api_token)) -> list[ApprovalResponse]:
         async with uow.begin() as unit:
             assert unit.repositories is not None
-            rows = await unit.repositories.approvals.list_pending()
+            rows = await unit.repositories.approvals.list_all(status="pending")
             return [ApprovalResponse.model_validate(r) for r in rows]
 
     @app.get("/v1/approvals/{approval_id}", response_model=ApprovalResponse)

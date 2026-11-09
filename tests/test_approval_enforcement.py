@@ -273,6 +273,22 @@ def test_generic_approval_endpoints_reject_decided_requests(env):
     assert client.post("/v1/approvals/missing/approve", json={}).status_code == 404
 
 
+def test_list_approvals_returns_only_pending_requests(env):
+    # Regression: the endpoint called a repository method that did not exist and always 500'd.
+    client, uow, _ = env
+    _, _, request_id = run(_paused_step(uow))
+
+    resp = client.get("/v1/approvals")
+    assert resp.status_code == 200
+    assert [a["id"] for a in resp.json()] == [request_id]
+    assert resp.json()[0]["status"] == "pending"
+
+    assert client.post(f"/v1/approvals/{request_id}/deny", json={}).status_code == 200
+    resp = client.get("/v1/approvals")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
 # --- Plan approvals --------------------------------------------------------------
 
 
