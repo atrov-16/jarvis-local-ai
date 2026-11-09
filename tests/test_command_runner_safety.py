@@ -14,7 +14,7 @@ import pytest
 from jarvis.tasks import command_runner as cr
 from jarvis.tasks.command_runner import CommandRunner
 
-posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+posix_only = pytest.mark.posix  # POSIX process-group semantics
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

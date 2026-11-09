@@ -41,7 +41,7 @@ from jarvis.tools.test_runner import TestTool, find_project_python
 from jarvis.tools.trash_manager import TrashManager
 from jarvis.workspaces.registry import WorkspaceRegistry, dangerous_root_reason
 
-posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX paths/symlinks")
+posix_only = pytest.mark.posix  # POSIX paths/symlinks
 
 
 def ok_result(command: str = "cmd") -> CommandResult:

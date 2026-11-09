@@ -13,11 +13,15 @@
   falls back to) are never contacted for real. Tests that need responses patch the client or
   pass a mock transport.
 - TestClient connects from 127.0.0.1 by default, a loopback peer for localhost_only.
+
+It also applies the platform markers (``windows``, ``macos``, ``posix``; see _platforms.py),
+so the suite runs to completion on each OS by itself and reports what is left for the other.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,7 +34,48 @@ from keyring.errors import PasswordDeleteError
 # Before any jarvis.app module is imported (they load .env at import time).
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
+from _platforms import MARKERS, host_label, other_platforms, platform_skip_reason  # noqa: E402
+
 from jarvis.config import paths  # noqa: E402
+
+_PLATFORM_SKIPS = pytest.StashKey[int]()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    for name, description in MARKERS.items():
+        config.addinivalue_line("markers", f"{name}: {description}")
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    return (
+        f"platform: {host_label()} ({sys.platform}); tests marked for other platforms "
+        "are skipped here, not failed"
+    )
+
+
+@pytest.hookimpl(trylast=True)  # after -m/-k deselection, so only selected tests are counted
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    skipped = 0
+    for item in items:
+        try:
+            reason = platform_skip_reason(mark.name for mark in item.iter_markers())
+        except ValueError as exc:
+            raise pytest.UsageError(f"{item.nodeid}: {exc}") from None
+        if reason is not None:
+            item.add_marker(pytest.mark.skip(reason=reason))
+            skipped += 1
+    config.stash[_PLATFORM_SKIPS] = skipped
+
+
+def pytest_terminal_summary(
+    terminalreporter: pytest.TerminalReporter, exitstatus: int, config: pytest.Config
+) -> None:
+    skipped = config.stash.get(_PLATFORM_SKIPS, 0)
+    if skipped:
+        terminalreporter.write_line(
+            f"{skipped} platform-specific test(s) skipped on {host_label()}; "
+            f"run `uv run pytest` on {' and '.join(other_platforms())} to cover them."
+        )
 
 ISOLATED_ENV_VARS = (
     "JARVIS_API_TOKEN",

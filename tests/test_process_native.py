@@ -22,8 +22,8 @@ from jarvis.tasks import command_runner as cr
 from jarvis.tasks.command_runner import CommandRunner
 
 WINDOWS = sys.platform == "win32"
-posix_only = pytest.mark.skipif(WINDOWS, reason="POSIX sessions and process groups")
-windows_only = pytest.mark.skipif(not WINDOWS, reason="Windows job objects and kernel32")
+posix_only = pytest.mark.posix  # POSIX sessions and process groups
+windows_only = pytest.mark.windows  # Windows job objects and kernel32
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 

@@ -26,9 +26,9 @@ from jarvis.workspaces.registry import dangerous_root_reason
 
 WINDOWS = sys.platform == "win32"
 DARWIN = sys.platform == "darwin"
-windows_only = pytest.mark.skipif(not WINDOWS, reason="Windows filesystem semantics")
-darwin_only = pytest.mark.skipif(not DARWIN, reason="case-insensitive macOS volume")
-posix_only = pytest.mark.skipif(WINDOWS, reason="POSIX behaviour")
+windows_only = pytest.mark.windows  # Windows filesystem semantics
+darwin_only = pytest.mark.macos  # case-insensitive macOS volume
+posix_only = pytest.mark.posix  # POSIX behaviour
 
 
 # --- One daemon per database -------------------------------------------------------------
@@ -168,7 +168,7 @@ def test_posix_backslash_is_an_ordinary_filename_character(tmp_path):
 # --- Command capability policy ---------------------------------------------------------------
 
 
-@pytest.mark.skipif(WINDOWS, reason="policy applies to Windows only")
+@posix_only  # the toolchain restriction applies to Windows only
 @pytest.mark.parametrize("binary", ["ls", "grep", "find", "make", "gcc", "g++", "node"])
 def test_no_platform_restriction_on_posix(binary):
     assert unsupported_on_this_platform(binary, "/usr/bin") is None
