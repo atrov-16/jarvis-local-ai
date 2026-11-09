@@ -3,11 +3,50 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 import aiosqlite
+
+# Words too common to help find a memory. Dropped from search queries unless the query
+# consists of nothing else.
+_FTS_STOPWORDS = frozenset(
+    "a an and are as at be but by can do does for from has have how i in is it its me my "
+    "of on or so that the their there this to was we what when where which who why will "
+    "with you your".split()
+)
+_FTS_TERM = re.compile(r"\w+\*?")
+_FTS_MAX_TERMS = 32
+
+
+def build_fts_query(query: str) -> str | None:
+    """Turn free text into an FTS5 query that matches any of its words.
+
+    Each word becomes a quoted FTS5 string (so operators and punctuation in the input are
+    inert) and the words are OR-ed together, so BM25 ranking puts memories matching more
+    and rarer words first. A trailing ``*`` on a word keeps prefix matching. Returns
+    ``None`` when the query has no searchable words.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+    for match in _FTS_TERM.findall(query):
+        prefix = match.endswith("*")
+        word = (match[:-1] if prefix else match).lower()
+        key = word + ("*" if prefix else "")
+        if not word or key in seen:
+            continue
+        seen.add(key)
+        terms.append(key)
+
+    meaningful = [t for t in terms if t.rstrip("*") not in _FTS_STOPWORDS]
+    chosen = (meaningful or terms)[:_FTS_MAX_TERMS]
+    if not chosen:
+        return None
+    return " OR ".join(
+        f'"{t[:-1]}"*' if t.endswith("*") else f'"{t}"' for t in chosen
+    )
 
 
 class AppStateRepository:
@@ -479,12 +518,10 @@ class MemoryRepository:
             WHERE long_term_memory_idx MATCH ?
         """
         
-        query_sanitized = query.replace('"', '""')
-        if query_sanitized.endswith("*"):
-            fts_query = f'"{query_sanitized[:-1]}"*'
-        else:
-            fts_query = f'"{query_sanitized}"'
-            
+        fts_query = build_fts_query(query)
+        if fts_query is None:
+            return []
+
         params: list[object] = [fts_query]
 
         if project_id:
