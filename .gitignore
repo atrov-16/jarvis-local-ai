@@ -9,4 +9,6 @@ __pycache__/
 *.sqlite-shm
 *.sqlite-wal
 .env
+# Local output of the understand-anything Claude Code plugin
+.ua/
 
