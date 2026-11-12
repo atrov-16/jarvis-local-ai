@@ -46,6 +46,10 @@ being green on Windows and macOS.
    already-approved `write_file`. Fix: make the "mark running" transaction in `_execute_step`
    conditional on the task still being `running`. I would do this one before merge: it is a small
    change and it is the approval/cancel boundary.
+   **Fixed before merge (a9430cb):** `_execute_step` now does a compare-and-set on the task
+   (`running` → `running`) in the same transaction that marks the step running and writes
+   `step_started`, and returns `StepOutcome.STOPPED` if the task was cancelled. The approval stays
+   unconsumed. Regression test: `test_a_cancel_after_the_last_check_stops_the_call_before_it_runs`.
 
 Not issues (checked by the reader): no approval bypass or double execution (approval is a one-time
 compare-and-set, consumed in the same transaction as `step_started`); risk classification and path
