@@ -12,7 +12,9 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
+from jarvis.app.call_preview import describe_call
 from jarvis.app.daemon import run_daemon
 from jarvis.config.env_file import EnvFileError, load_env_file
 from jarvis.config.manager import load_config
@@ -527,6 +529,36 @@ def memory_remove(
             _handle_api_error(e)
 
 
+_CALL_LINE_STYLES = {"add": "green", "del": "red", "meta": "dim", "plain": ""}
+
+
+def _print_call(step: dict) -> None:
+    """Print what a tool call will do: its arguments, or the diff for a file edit, and its risk.
+    Printed as plain text (never console markup), in full."""
+    risk = step.get("risk_level")
+    header = f"{step.get('tool_name') or 'call'}" + (f"  (risk: {risk})" if risk else "")
+    console.print(Text(header, style="bold yellow"))
+    for kind, text in describe_call(step.get("tool_name"), step.get("input_json")):
+        console.print(Text("  " + text, style=_CALL_LINE_STYLES.get(kind, "")))
+
+
+def _print_final_answer(task: dict) -> None:
+    answer = task.get("final_answer")
+    if answer:
+        console.print(Text("\nAnswer:", style="bold green"))
+        console.print(Text(str(answer)))
+
+
+def _find_step(steps: object, step_id: str) -> dict | None:
+    """The step whose id is `step_id` (or starts with it), if the task's steps list has it."""
+    if not isinstance(steps, list):
+        return None
+    for s in steps:
+        if isinstance(s, dict) and str(s.get("id", "")).startswith(step_id):
+            return s
+    return None
+
+
 @task_app.command("submit")
 def task_submit(
     request: str,
@@ -655,6 +687,7 @@ def task_show(
             steps = task.get("steps", [])
             if not steps:
                 console.print("No steps yet.")
+                _print_final_answer(task)
                 return
 
             table = Table(title="Task Steps")
@@ -697,7 +730,10 @@ def task_show(
             if waiting_steps:
                 console.print("\n[yellow]Steps Waiting for Approval:[/yellow]")
                 for ws in waiting_steps:
+                    _print_call(ws)
                     console.print(f"  To approve: [bold]uv run jarvis task approve {task['id'][:8]} --step {ws['id']}[/bold]")
+
+            _print_final_answer(task)
 
         except Exception as e:
             _handle_api_error(e)
@@ -721,13 +757,15 @@ def task_approve(
                         task_id = t["id"]
                         break
 
+            resp_s = client.get(f"/v1/tasks/{task_id}")
+            resp_s.raise_for_status()
+            task_steps = resp_s.json().get("steps", [])
+
             if not step:
                 # Tasks have no plan to approve: the only thing to approve is a tool call
                 # the task is waiting on. Use it if there is exactly one.
-                resp_s = client.get(f"/v1/tasks/{task_id}")
-                resp_s.raise_for_status()
                 waiting = [
-                    s for s in resp_s.json().get("steps", [])
+                    s for s in task_steps
                     if s["status"] == "waiting_for_approval"
                 ]
                 if len(waiting) != 1:
@@ -742,13 +780,16 @@ def task_approve(
                     raise typer.Exit(1)
                 step = waiting[0]["id"]
             elif len(step) < 36:
-                resp_s = client.get(f"/v1/tasks/{task_id}")
-                resp_s.raise_for_status()
-                for s in resp_s.json().get("steps", []):
+                for s in task_steps:
                     if s["id"].startswith(step):
                         step = s["id"]
                         break
 
+            # Show exactly what is being approved before approving it.
+            shown = _find_step(task_steps, step)
+            if shown is not None:
+                console.print(Text("Approving:", style="bold"))
+                _print_call(shown)
             resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/approve", json={"reason": None})
             resp.raise_for_status()
             console.print(f"[green]Task step approved:[/green] {step[:8]}")
@@ -775,14 +816,19 @@ def task_deny(
                         task_id = t["id"]
                         break
             
+            resp_s = client.get(f"/v1/tasks/{task_id}")
+            resp_s.raise_for_status()
+            task_steps = resp_s.json().get("steps", [])
             if len(step) < 36:
-                resp_s = client.get(f"/v1/tasks/{task_id}")
-                resp_s.raise_for_status()
-                for s in resp_s.json().get("steps", []):
+                for s in task_steps:
                     if s["id"].startswith(step):
                         step = s["id"]
                         break
 
+            shown = _find_step(task_steps, step)
+            if shown is not None:
+                console.print(Text("Denying:", style="bold"))
+                _print_call(shown)
             resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/deny", json={"reason": reason})
             resp.raise_for_status()
             console.print(f"[yellow]Task step denied:[/yellow] {step[:8]}")

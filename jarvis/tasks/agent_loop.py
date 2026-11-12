@@ -315,7 +315,7 @@ class AgentLoop:
                 task_id=task_id,
                 event_type="final_answer",
                 message="The model gave its final answer.",
-                payload={"chars": len(answer)},
+                payload={"chars": len(answer), "answer": answer},
             )
             await tasks.insert_event(
                 task_id=task_id,
@@ -458,7 +458,11 @@ class AgentLoop:
                     step_id=step["id"],
                     event_type="step_failed",
                     message=f"Step interrupted: {step['title']}",
-                    payload={"error": "interrupted"},
+                    payload={
+                        "error": "interrupted",
+                        "tool_call_id": step.get("tool_call_id"),
+                        "tool_name": step.get("tool_name"),
+                    },
                     severity="error",
                 )
 

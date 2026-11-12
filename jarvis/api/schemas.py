@@ -159,15 +159,22 @@ class TaskStepResponse(BaseModel):
     title: str
     description: str | None = None
     tool_name: str | None = None
+    # The model's id for this call; events and the model's tool messages use the same id.
+    tool_call_id: str | None = None
+    # The full arguments of the call as stored (canonical JSON). Never shortened.
     input_json: str | None = None
     status: str
     requires_approval: bool
+    # Risk of the call's latest approval request; None if it never needed one.
+    risk_level: str | None = None
     attempt_count: int
     output_json: str | None = None
     error: str | None = None
 
 
 class TaskEventResponse(BaseModel):
+    # Position in the task's event log; pass the last one seen as `?since=` to catch up.
+    seq: int | None = None
     id: str
     step_id: str | None = None
     event_type: str

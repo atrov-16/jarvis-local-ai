@@ -44,6 +44,11 @@ LOG = logging.getLogger(__name__)
 ACTIVE_STATUSES = ("queued", "planning", "running")
 
 
+def _call_identity(step: dict[str, Any]) -> dict[str, object]:
+    """Which model tool call a step event is about (clients match events to calls by this)."""
+    return {"tool_call_id": step.get("tool_call_id"), "tool_name": step.get("tool_name")}
+
+
 class TaskQueue:
     def __init__(
         self,
@@ -197,7 +202,7 @@ class TaskQueue:
                 tool_category = tool.category
             except KeyError:
                 error = f"Tool not found: {tool_name}"
-                await self._record_step_failure(unit, task_id, step_id, error)
+                await self._record_step_failure(unit, task_id, current_step, error)
                 return StepOutcome.FAILED
 
             # Unified Risk Classification
@@ -247,7 +252,13 @@ class TaskQueue:
                         step_id=step_id,
                         event_type="approval_requested",
                         message=message,
-                        payload={"status": "waiting_for_approval", "risk_level": risk_level.value},
+                        payload={
+                            "status": "waiting_for_approval",
+                            "risk_level": risk_level.value,
+                            "approval_id": correlation_id,
+                            "tool_call_id": current_step["tool_call_id"],
+                            "tool_name": tool_name,
+                        },
                         severity="warning",
                         correlation_id=correlation_id,
                     )
@@ -278,6 +289,7 @@ class TaskQueue:
                 step_id=step_id,
                 event_type="step_started",
                 message=f"Starting step: {step['title']}",
+                payload=_call_identity(current_step),
                 correlation_id=approval_request_id
             )
 
@@ -318,7 +330,11 @@ class TaskQueue:
                     step_id=step_id,
                     event_type="step_completed",
                     message=f"Completed step: {step['title']}",
-                    payload={"execution_time": result.execution_time},
+                    payload={
+                        "execution_time": result.execution_time,
+                        "success": True,
+                        **_call_identity(current_step),
+                    },
                     correlation_id=approval_request_id
                 )
                 return StepOutcome.COMPLETED
@@ -326,7 +342,7 @@ class TaskQueue:
             await self._record_step_failure(
                 unit,
                 task_id,
-                step_id,
+                current_step,
                 result.error or "Tool reported failure without an error message.",
                 correlation_id=approval_request_id,
                 timeout=result.timeout_occurred,
@@ -337,7 +353,7 @@ class TaskQueue:
         self,
         unit: UnitOfWorkScope,
         task_id: str,
-        step_id: str,
+        step: dict[str, Any],
         error: str,
         *,
         correlation_id: str | None = None,
@@ -347,13 +363,14 @@ class TaskQueue:
         loop reports the error to the model, which decides what to do next."""
         assert unit.repositories is not None
         tasks = unit.repositories.tasks
+        step_id = step["id"]
         await tasks.update_step(step_id, status="failed", error=error)
         await tasks.insert_event(
             task_id=task_id,
             step_id=step_id,
             event_type="step_failed",
             message=f"Step failed: {error}",
-            payload={"error": error, "timeout": timeout},
+            payload={"error": error, "timeout": timeout, **_call_identity(step)},
             severity="error",
             correlation_id=correlation_id,
         )

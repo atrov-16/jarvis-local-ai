@@ -15,6 +15,7 @@ from jarvis.api.schemas import (
 from jarvis.approvals.broker import ApprovalBroker
 from jarvis.memory.store import MemoryStore
 from jarvis.storage.unit_of_work import UnitOfWork
+from jarvis.tasks.decisions import DecisionError, decide_approval
 
 LOG = logging.getLogger(__name__)
 
@@ -88,18 +89,28 @@ class ApprovalCenterService:
         
         async def handle_item(item: BulkApprovalItem):
             try:
+                if item.type == "action":
+                    # Same path as the single-request routes: a task's tool call also moves
+                    # its step and task. Each item is its own transaction.
+                    try:
+                        async with self._uow.begin() as unit:
+                            await decide_approval(
+                                unit,
+                                self._approval_broker,
+                                item.id,
+                                approve=request.action == "approve",
+                                reason=request.reason,
+                                decided_by=user_id,
+                            )
+                    except DecisionError as e:
+                        return {"id": item.id, "success": False, "error": e.detail}
+                    return {"id": item.id, "success": True}
                 if request.action == "approve":
-                    if item.type == "action":
-                        success = await self._approval_broker.approve(item.id, decided_by=user_id, reason=request.reason)
-                        return {"id": item.id, "success": success}
-                    elif item.type in ("memory", "consolidation"):
+                    if item.type in ("memory", "consolidation"):
                         memory_id = await self._memory_store.approve(item.id)
                         return {"id": item.id, "success": True, "memory_id": memory_id}
                 else:  # deny
-                    if item.type == "action":
-                        success = await self._approval_broker.deny(item.id, decided_by=user_id, reason=request.reason)
-                        return {"id": item.id, "success": success}
-                    elif item.type in ("memory", "consolidation"):
+                    if item.type in ("memory", "consolidation"):
                         success = await self._memory_store.deny(item.id, reason=request.reason)
                         return {"id": item.id, "success": success}
             except Exception as e:

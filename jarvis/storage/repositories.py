@@ -680,8 +680,15 @@ class MemoryRepository:
 
 
 class TaskRepository:
-    def __init__(self, connection: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        connection: aiosqlite.Connection,
+        event_log: list[dict[str, object]] | None = None,
+    ) -> None:
         self._connection = connection
+        # Every event inserted through this repository is also appended here, so the unit of
+        # work can hand them on once (and only if) the transaction commits.
+        self._event_log = event_log
 
     async def insert(
         self,
@@ -891,10 +898,10 @@ class TaskRepository:
         correlation_id: str | None = None,
     ) -> str:
         event_id = id or str(uuid4())
-        await self._connection.execute(
+        cursor = await self._connection.execute(
             """
             INSERT INTO task_events (
-                id, task_id, step_id, event_type, message, 
+                id, task_id, step_id, event_type, message,
                 payload_json, severity, correlation_id, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -911,12 +918,43 @@ class TaskRepository:
                 _now(),
             ),
         )
+        if self._event_log is not None:
+            self._event_log.append(
+                {
+                    "seq": cursor.lastrowid,
+                    "id": event_id,
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "event_type": event_type,
+                    "message": message,
+                    "payload": dict(payload or {}),
+                    "severity": severity,
+                    "correlation_id": correlation_id,
+                }
+            )
         return event_id
 
     async def list_events(self, task_id: str) -> list[dict[str, object]]:
-        cursor = await self._connection.execute(
-            "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC", (task_id,)
+        """All events of the task in the order they were written, each with its `seq`."""
+        return await self.list_events_since(task_id, since=0, limit=None)
+
+    async def list_events_since(
+        self, task_id: str, *, since: int = 0, limit: int | None = None
+    ) -> list[dict[str, object]]:
+        """Events written after `since` (a `seq` the caller already has), oldest first.
+
+        `seq` is the table's rowid: it only grows, so it is a stable cursor even when two
+        events share a `created_at`.
+        """
+        sql = (
+            "SELECT rowid AS seq, * FROM task_events WHERE task_id = ? AND rowid > ? "
+            "ORDER BY rowid ASC"
         )
+        params: list[object] = [task_id, since]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        cursor = await self._connection.execute(sql, tuple(params))
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -1105,6 +1143,21 @@ class ApprovalRepository:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def risk_levels_by_step(self, task_id: str) -> dict[str, str]:
+        """Risk level of the latest tool approval request of each step of the task.
+
+        A step that never needed an approval request has no entry."""
+        cursor = await self._connection.execute(
+            """
+            SELECT step_id, risk_level FROM approval_requests
+            WHERE task_id = ? AND step_id IS NOT NULL AND action_type = 'tool'
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            (task_id,),
+        )
+        # Ascending, so the latest request of a step overwrites the earlier ones.
+        return {str(row["step_id"]): str(row["risk_level"]) for row in await cursor.fetchall()}
+
     async def get_latest_for_task(self, task_id: str, action_type: str) -> dict[str, Any] | None:
         """Most recent approval request of `action_type` for the task (e.g. its plan)."""
         cursor = await self._connection.execute(
@@ -1177,13 +1230,17 @@ class ProcessRegistryRepository:
 
 
 class StorageRepositories:
-    def __init__(self, connection: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        connection: aiosqlite.Connection,
+        task_event_log: list[dict[str, object]] | None = None,
+    ) -> None:
         self.app_state = AppStateRepository(connection)
         self.audit = AuditRepository(connection)
         self.workspaces = WorkspaceRepository(connection)
         self.projects = ProjectRepository(connection)
         self.memory = MemoryRepository(connection)
-        self.tasks = TaskRepository(connection)
+        self.tasks = TaskRepository(connection, task_event_log)
         self.approvals = ApprovalRepository(connection)
         self.processes = ProcessRegistryRepository(connection)
 

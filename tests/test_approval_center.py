@@ -74,7 +74,7 @@ async def test_list_pending_unified(mock_uow, mock_broker, mock_store):
 
 
 @pytest.mark.asyncio
-async def test_bulk_approve_mixed(mock_uow, mock_broker, mock_store):
+async def test_bulk_approve_mixed(mock_uow, mock_broker, mock_store, monkeypatch):
     service = ApprovalCenterService(mock_uow, mock_broker, mock_store)
     
     from jarvis.api.schemas import BulkApprovalItem, BulkApprovalRequest
@@ -87,14 +87,39 @@ async def test_bulk_approve_mixed(mock_uow, mock_broker, mock_store):
         ]
     )
     
-    mock_broker.approve = AsyncMock(return_value=True)
     mock_store.approve = AsyncMock(return_value="m1")
-    
+    # Actions are decided by the shared helper that also moves the step and the task
+    # (tasks/decisions.py); its behaviour is covered in test_approval_drives_task.py.
+    decide = AsyncMock()
+    monkeypatch.setattr("jarvis.api.services.approval_center.decide_approval", decide)
+
     results = await service.bulk_respond(request)
-    
+
     assert results["summary"]["success"] == 2
-    mock_broker.approve.assert_called_once_with("a1", decided_by="user", reason=None)
+    decide.assert_awaited_once()
+    args, kwargs = decide.await_args
+    assert args[1] is mock_broker and args[2] == "a1"
+    assert kwargs == {"approve": True, "reason": None, "decided_by": "user"}
     mock_store.approve.assert_called_once_with("p1")
+
+
+@pytest.mark.asyncio
+async def test_bulk_reports_a_refused_decision_as_failed(
+    mock_uow, mock_broker, mock_store, monkeypatch
+):
+    from jarvis.api.schemas import BulkApprovalItem, BulkApprovalRequest
+    from jarvis.tasks.decisions import DecisionError
+
+    service = ApprovalCenterService(mock_uow, mock_broker, mock_store)
+    refuse = AsyncMock(side_effect=DecisionError(409, "Approval request is approved; nope."))
+    monkeypatch.setattr("jarvis.api.services.approval_center.decide_approval", refuse)
+
+    results = await service.bulk_respond(
+        BulkApprovalRequest(action="deny", items=[BulkApprovalItem(id="a1", type="action")])
+    )
+
+    assert results["summary"] == {"total": 1, "success": 0, "failed": 1}
+    assert results["results"][0]["error"] == "Approval request is approved; nope."
 
 
 @pytest.mark.asyncio

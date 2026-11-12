@@ -8,12 +8,11 @@ import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket
 from fastapi.responses import JSONResponse
 
 from jarvis import __version__
@@ -73,9 +72,11 @@ from jarvis.models.router import ModelRouter
 from jarvis.projects.registry import ProjectRegistry
 from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
-from jarvis.storage.unit_of_work import UnitOfWork, UnitOfWorkScope
+from jarvis.storage.unit_of_work import UnitOfWork
 from jarvis.tasks.command_runner import CommandRunner
 from jarvis.tasks.agent_loop import title_from_request
+from jarvis.tasks.decisions import DecisionError, decide_approval, decide_step
+from jarvis.tasks.event_relay import make_commit_hook
 from jarvis.tasks.queue import TaskQueue
 from jarvis.tools.build_runner import BuildTool
 from jarvis.tools.executor import ToolExecutor
@@ -99,6 +100,8 @@ LOG = logging.getLogger(__name__)
 
 # Task states from which a user may resume or cancel.
 RESUMABLE_TASK_STATUSES = ("paused", "failed", "interrupted")
+# Most events one `GET /v1/tasks/{id}/events` call returns; a client pages with `since`.
+MAX_EVENTS_PER_REQUEST = 500
 CANCELLABLE_TASK_STATUSES = (
     "queued", "planning", "waiting_for_plan_approval", "running", "paused", "failed", "interrupted",
 )
@@ -117,7 +120,8 @@ def create_app(
     bus = event_bus or EventBus()
     db_path = database_path or resolve_database_path(jarvis_config)
 
-    uow = UnitOfWork(db_path)
+    # Task events are published on the bus only after the transaction that wrote them commits.
+    uow = UnitOfWork(db_path, on_commit=make_commit_hook(bus))
     workspaces = WorkspaceRegistry(uow)
     projects = ProjectRegistry(uow)
     memory_store = MemoryStore(uow)
@@ -492,19 +496,14 @@ def create_app(
     async def approve_request(
         approval_id: str, data: ApprovalDecisionRequest, _: None = Depends(require_api_token)
     ) -> JSONResponse:
+        # A request for a task's tool call also moves its step and task (see tasks/decisions.py).
         async with uow.begin() as unit:
-            assert unit.repositories is not None
-            request = await unit.repositories.approvals.get(approval_id)
-            if not request:
-                raise HTTPException(status_code=404, detail="Approval request not found.")
-            if not await approval_broker.approve(approval_id, reason=data.reason, unit=unit):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Approval request is {request['status']}; "
-                        "only pending requests can be approved."
-                    ),
+            try:
+                await decide_approval(
+                    unit, approval_broker, approval_id, approve=True, reason=data.reason
                 )
+            except DecisionError as e:
+                raise HTTPException(status_code=e.status_code, detail=e.detail) from None
         return JSONResponse({"approved": True})
 
     @app.post("/v1/approvals/{approval_id}/deny")
@@ -512,18 +511,12 @@ def create_app(
         approval_id: str, data: ApprovalDecisionRequest, _: None = Depends(require_api_token)
     ) -> JSONResponse:
         async with uow.begin() as unit:
-            assert unit.repositories is not None
-            request = await unit.repositories.approvals.get(approval_id)
-            if not request:
-                raise HTTPException(status_code=404, detail="Approval request not found.")
-            if not await approval_broker.deny(approval_id, reason=data.reason, unit=unit):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Approval request is {request['status']}; "
-                        "only pending requests can be denied."
-                    ),
+            try:
+                await decide_approval(
+                    unit, approval_broker, approval_id, approve=False, reason=data.reason
                 )
+            except DecisionError as e:
+                raise HTTPException(status_code=e.status_code, detail=e.detail) from None
         return JSONResponse({"denied": True})
 
     # Task Endpoints
@@ -589,11 +582,35 @@ def create_app(
             
             steps = await unit.repositories.tasks.list_steps(task_id)
             events = await unit.repositories.tasks.list_events(task_id)
-            
-            task["steps"] = [TaskStepResponse.model_validate(s) for s in steps]
+            risks = await unit.repositories.approvals.risk_levels_by_step(task_id)
+
+            task["steps"] = [
+                TaskStepResponse.model_validate({**s, "risk_level": risks.get(str(s["id"]))})
+                for s in steps
+            ]
             task["events"] = [TaskEventResponse.model_validate(e) for e in events]
-            
+
             return TaskDetailResponse.model_validate(task)
+
+    @app.get("/v1/tasks/{task_id}/events", response_model=list[TaskEventResponse])
+    async def get_task_events(
+        task_id: str,
+        since: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=MAX_EVENTS_PER_REQUEST)] = MAX_EVENTS_PER_REQUEST,
+        _: None = Depends(require_api_token),
+    ) -> list[TaskEventResponse]:
+        """Events after the cursor `since` (a `seq` the client already has), oldest first.
+
+        For catching up after a dropped WebSocket: ask again with the last `seq` received,
+        until fewer than `limit` events come back."""
+        async with uow.begin() as unit:
+            assert unit.repositories is not None
+            if not await unit.repositories.tasks.get(task_id):
+                raise HTTPException(status_code=404, detail="Task not found.")
+            events = await unit.repositories.tasks.list_events_since(
+                task_id, since=since, limit=limit
+            )
+            return [TaskEventResponse.model_validate(e) for e in events]
 
     @app.get("/v1/tasks/{task_id}/trace", response_model=TaskTraceResponse)
     async def get_task_trace(task_id: str, include_system: bool = False, _: None = Depends(require_api_token)) -> TaskTraceResponse:
@@ -645,43 +662,24 @@ def create_app(
             )
         return JSONResponse({"resumed": True})
 
-    async def _load_step_awaiting_decision(
-        unit: UnitOfWorkScope, task_id: str, step_id: str
-    ) -> dict[str, Any]:
-        """Validate that a step decision is legitimate; return the step's approval request.
-
-        Raises 404 if the task or step is missing or the step belongs to another task,
-        and 409 if the task/step/approval is not in a decidable state (completed,
-        cancelled, already decided, or an approval that was already used).
-        """
-        assert unit.repositories is not None
-        task = await unit.repositories.tasks.get(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found.")
-        step = await unit.repositories.tasks.get_step(step_id)
-        if not step or step["task_id"] != task_id:
-            raise HTTPException(status_code=404, detail="Step not found for this task.")
-        if step["status"] != "waiting_for_approval":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Step is {step['status']}; only steps waiting for approval can be decided.",
-            )
-        if task["status"] != "paused":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Task is {task['status']}; step decisions require a paused task.",
-            )
-        request = await unit.repositories.approvals.get_latest_for_step(task_id, step_id, "tool")
-        if not request:
-            raise HTTPException(status_code=409, detail="No approval request exists for this step.")
-        approvals = unit.repositories.approvals
-        if request["status"] == "approved" and await approvals.is_consumed(request["id"]):
-            raise HTTPException(status_code=409, detail="Approval request was already used.")
-        if request["status"] not in ("pending", "approved"):
-            raise HTTPException(status_code=409, detail=f"Approval request is {request['status']}.")
-        if request["expires_at"] and str(request["expires_at"]) <= datetime.now(UTC).isoformat():
-            raise HTTPException(status_code=409, detail="Approval request has expired.")
-        return request
+    async def _decide_step_route(
+        task_id: str, step_id: str, data: TaskDecisionRequest, *, approve: bool
+    ) -> TaskStepResponse:
+        async with uow.begin() as unit:
+            try:
+                step = await decide_step(
+                    unit,
+                    approval_broker,
+                    task_id=task_id,
+                    step_id=step_id,
+                    approve=approve,
+                    reason=data.reason,
+                )
+            except DecisionError as e:
+                raise HTTPException(status_code=e.status_code, detail=e.detail) from None
+            assert unit.repositories is not None
+            risks = await unit.repositories.approvals.risk_levels_by_step(task_id)
+            return TaskStepResponse.model_validate({**step, "risk_level": risks.get(step_id)})
 
     @app.post("/v1/tasks/{task_id}/steps/{step_id}/approve", response_model=TaskStepResponse)
     async def approve_task_step(
@@ -690,47 +688,8 @@ def create_app(
         data: TaskDecisionRequest,
         _: None = Depends(require_api_token),
     ) -> TaskStepResponse:
-        """Approve a paused task step."""
-        async with uow.begin() as unit:
-            assert unit.repositories is not None
-            request = await _load_step_awaiting_decision(unit, task_id, step_id)
-            # A pending request is approved here; one already approved elsewhere (e.g. the
-            # approval center) but not yet used is accepted as is.
-            if request["status"] == "pending" and not await approval_broker.approve(
-                request["id"], reason=data.reason, unit=unit
-            ):
-                raise HTTPException(
-                    status_code=409, detail="Approval request is no longer pending."
-                )
-
-            tasks = unit.repositories.tasks
-            if not await tasks.transition_step(
-                step_id, "approved", from_statuses=("waiting_for_approval",)
-            ):
-                raise HTTPException(status_code=409, detail="Step state changed; not approved.")
-            if not await tasks.transition(task_id, "queued", from_statuses=("paused",)):
-                raise HTTPException(status_code=409, detail="Task state changed; not approved.")
-
-            await tasks.insert_event(
-                task_id=task_id,
-                step_id=step_id,
-                event_type="approval_granted",
-                message="Step approved by user",
-                payload={"reason": data.reason},
-                correlation_id=request["id"],
-            )
-            await tasks.insert_event(
-                task_id=task_id,
-                step_id=step_id,
-                event_type="status_change",
-                message="Task queued after step approval",
-                payload={"status": "queued"},
-                correlation_id=request["id"],
-            )
-            
-            updated_step = await tasks.get_step(step_id)
-            assert updated_step is not None
-            return TaskStepResponse.model_validate(updated_step)
+        """Approve a paused task step: the call runs once and the task goes back in the queue."""
+        return await _decide_step_route(task_id, step_id, data, approve=True)
 
     @app.post("/v1/tasks/{task_id}/steps/{step_id}/deny", response_model=TaskStepResponse)
     async def deny_task_step(
@@ -741,48 +700,7 @@ def create_app(
     ) -> TaskStepResponse:
         """Deny a paused task step. The call is not run; the task goes back in the queue and the
         agent loop tells the model the user denied it, so the model can adapt."""
-        async with uow.begin() as unit:
-            assert unit.repositories is not None
-            request = await _load_step_awaiting_decision(unit, task_id, step_id)
-            if not await approval_broker.deny(
-                request["id"], reason=data.reason, unit=unit, expected_status=request["status"]
-            ):
-                raise HTTPException(
-                    status_code=409, detail="Approval request state changed; not denied."
-                )
-
-            tasks = unit.repositories.tasks
-            # 'skipped' is the step's final state; this text is what the model is told.
-            error_msg = "the user denied this call."
-            if data.reason:
-                error_msg += f" Reason: {data.reason}"
-            if not await tasks.transition_step(
-                step_id, "skipped", from_statuses=("waiting_for_approval",), error=error_msg
-            ):
-                raise HTTPException(status_code=409, detail="Step state changed; not denied.")
-            if not await tasks.transition(task_id, "queued", from_statuses=("paused",)):
-                raise HTTPException(status_code=409, detail="Task state changed; not denied.")
-
-            await tasks.insert_event(
-                task_id=task_id,
-                step_id=step_id,
-                event_type="approval_denied",
-                message="Step denied by user",
-                payload={"reason": data.reason},
-                correlation_id=request["id"],
-            )
-            await tasks.insert_event(
-                task_id=task_id,
-                step_id=step_id,
-                event_type="status_change",
-                message="Task queued after step denial; the model will be told",
-                payload={"status": "queued"},
-                correlation_id=request["id"],
-            )
-            
-            updated_step = await tasks.get_step(step_id)
-            assert updated_step is not None
-            return TaskStepResponse.model_validate(updated_step)
+        return await _decide_step_route(task_id, step_id, data, approve=False)
 
     @app.post("/v1/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:

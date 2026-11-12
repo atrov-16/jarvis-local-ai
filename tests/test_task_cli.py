@@ -309,3 +309,152 @@ def test_task_show_waiting_for_approval(mock_client_ctx: MagicMock) -> None:
     assert "Steps Waiting for Approval:" in result.stdout
     assert "uv run jarvis task approve task-app --step step-approval-999" in result.stdout
 
+
+# --- Phase 17 slice 5: the call's arguments are shown before it is approved ------------------
+
+import json  # noqa: E402
+
+
+def _waiting_task(tool_name: str, arguments: dict, **step_extra) -> dict:
+    return {
+        "id": "task-args-1234567890123456789012345678",
+        "title": "Args Task",
+        "user_request": "Do it",
+        "status": "paused",
+        "project_id": None,
+        "final_answer": None,
+        "steps": [
+            {
+                "id": "step-args-1",
+                "step_index": 0,
+                "title": f"{tool_name}: x",
+                "status": "waiting_for_approval",
+                "tool_name": tool_name,
+                "tool_call_id": "call_1",
+                "risk_level": "high",
+                "input_json": json.dumps(arguments),
+                "output_json": None,
+                "error": None,
+                **step_extra,
+            }
+        ],
+    }
+
+
+def _serve(mock_client: MagicMock, task: dict) -> None:
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.json.return_value = [task] if url == "/v1/tasks" else task
+        return resp
+
+    mock_client.get.side_effect = mock_get
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_prints_the_arguments_and_risk_of_a_waiting_call(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(mock_client, _waiting_task("generic_command", {"binary": "git", "args": ["push"]}))
+
+    result = runner.invoke(app, ["task", "show", "task-args"])
+
+    assert result.exit_code == 0
+    assert "binary: git" in result.stdout and "push" in result.stdout
+    assert "high" in result.stdout  # the risk level
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_prints_a_diff_for_a_waiting_patch(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(
+        mock_client,
+        _waiting_task(
+            "patch_file",
+            {"path": "a.py", "hunks": [{"search": "old = 1", "replace": "new = 2"}]},
+        ),
+    )
+
+    result = runner.invoke(app, ["task", "show", "task-args"])
+
+    assert "- old = 1" in result.stdout and "+ new = 2" in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_prints_markup_in_arguments_literally(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(mock_client, _waiting_task("write_file", {"path": "a", "content": "[red]hi[/red]"}))
+
+    result = runner.invoke(app, ["task", "show", "task-args"])
+
+    assert "[red]hi[/red]" in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_show_prints_the_final_answer_of_a_completed_task(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    task = _waiting_task("echo", {"text": "hi"})
+    task.update(status="completed", final_answer="All finished: wrote the file.")
+    task["steps"][0].update(status="completed", output_json='{"echo": "hi"}')
+    _serve(mock_client, task)
+
+    result = runner.invoke(app, ["task", "show", "task-args"])
+
+    assert "Answer:" in result.stdout and "All finished: wrote the file." in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_approve_prints_the_arguments_before_it_approves(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(mock_client, _waiting_task("write_file", {"path": "out.txt", "content": "payload"}))
+    order: list[str] = []
+    mock_client.post.side_effect = lambda *a, **k: order.append("POST") or MagicMock()
+
+    with patch("jarvis.app.terminal.console.print") as printed:
+        printed.side_effect = lambda *a, **k: order.append("PRINT:" + " ".join(map(str, a)))
+        result = runner.invoke(app, ["task", "approve", "task-args"])
+
+    assert result.exit_code == 0
+    post_at = order.index("POST")
+    shown_before = " ".join(order[:post_at])
+    assert "out.txt" in shown_before and "payload" in shown_before and "high" in shown_before
+    mock_client.post.assert_called_once_with(
+        "/v1/tasks/task-args-1234567890123456789012345678/steps/step-args-1/approve",
+        json={"reason": None},
+    )
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_approve_with_an_explicit_step_also_shows_what_it_approves(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(mock_client, _waiting_task("generic_command", {"binary": "rm", "args": ["-rf", "x"]}))
+
+    result = runner.invoke(app, ["task", "approve", "task-args", "--step", "step-args"])
+
+    assert result.exit_code == 0
+    assert "binary: rm" in result.stdout and "-rf" in result.stdout
+    assert mock_client.post.call_count == 1
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_deny_also_shows_what_it_denies(mock_client_ctx: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _serve(mock_client, _waiting_task("generic_command", {"binary": "rm", "args": ["x"]}))
+
+    result = runner.invoke(app, ["task", "deny", "task-args", "--step", "step-args"])
+
+    assert result.exit_code == 0 and "binary: rm" in result.stdout
+
