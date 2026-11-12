@@ -9,17 +9,17 @@ The author works on two machines: a **Windows laptop** (`C:\jarvis`) at home and
 college. GitHub (`atrov-16/jarvis-local-ai`) is the only sync between them. Commit and push before
 switching machines; pull when starting.
 
-## Where things stand (as of 2026-11-11)
+## Where things stand (as of 2026-11-13)
 
-- `main` is at `f6e4c25` ("Add task show command"). All current work is on branch
-  `phase16/checkpoint-paused` (pushed), which was 21 commits ahead of `main` at `a23ca6b` and
-  already contains the `rc-hardening` fixes from the October review. Don't merge it into `main`
-  until a macOS run is green.
-- Windows suite at `a23ca6b`: 641 passed, 37 skipped (the skips are macOS/POSIX-only tests).
-  **macOS has not been run yet** on this branch.
+- `main` is at `d25e5b3`: Phase 16 is merged. GitHub CI passed on Windows and macOS at
+  `d25e5b3`, which is what cleared the merge. Phase 17 work is on branch
+  `phase16/checkpoint-paused` (pushed, draft PR #1). Don't merge that PR into `main` until CI is
+  green on both platforms.
+- Windows suite at `d25e5b3`: 776 passed, 37 skipped (the skips are macOS/POSIX-only tests).
+  No local macOS run since Phase 17 began; CI is the only macOS signal.
 - CI exists: `.github/workflows/ci.yml` (Windows and macOS, Python 3.12 and 3.13).
 - ruff and mypy are held at the baseline in `.github/static-analysis-baseline.json`
-  (247 / 112 at `a23ca6b`). Stay at or below it, and lower the numbers when you fix findings.
+  (232 / 106 at `d25e5b3`). Stay at or below it, and lower the numbers when you fix findings.
 - Platform-specific tests use the markers in `tests/_platforms.py` (`windows`, `macos`, `posix`).
   macOS/POSIX-marked tests added since the last Mac run are listed in
   `docs/mac-test-checklist.md`.
