@@ -23,14 +23,18 @@ switching machines; pull when starting.
 - Platform-specific tests use the markers in `tests/_platforms.py` (`windows`, `macos`, `posix`).
   macOS/POSIX-marked tests added since the last Mac run are listed in
   `docs/mac-test-checklist.md`.
-- Phase 17 (the observe-act agent loop) is in progress on `phase16/checkpoint-paused` (draft PR
-  #1). Done: slice 1 native tool calling, slice 2 non-blocking EventBus, slice 3 migration 0016,
-  slice 4 the loop (`jarvis/tasks/agent_loop.py` replaced the planner; no plan approval; a denied
-  or failed tool call is reported to the model instead of failing the task; `final_answer` and
-  `/summary` coexist; defaults 15 turns / 5 calls per turn in `TasksConfig`). Next: slice 5
-  (API response fields, events after commit, `GET /v1/tasks/{id}/events?since=`,
-  `/v1/approvals/{id}/approve` driving transitions, CLI shows args before approving).
-  Plan: `docs/gui-and-agent-loop-plan.md`.
+- Phase 17 (the observe-act agent loop): done, on `phase16/checkpoint-paused` (PR #1, ready for
+  review, not merged; merge once CI is green on both platforms). Slices: 1 native tool calling,
+  2 non-blocking EventBus, 3 migration 0016, 4 the loop (`jarvis/tasks/agent_loop.py` replaced the
+  planner; no plan approval; a denied or failed tool call is reported to the model instead of
+  failing the task; `final_answer` and `/summary` coexist; defaults 15 turns / 5 calls per turn in
+  `TasksConfig`), 5 the client surface: `final_answer`, step `tool_call_id`/`risk_level`/full
+  `input_json` in responses; task events published on the bus only after commit
+  (`UnitOfWork(on_commit=...)`, `jarvis/tasks/event_relay.py`, each with a `seq`);
+  `GET /v1/tasks/{id}/events?since=` for catch-up; one decision path
+  (`jarvis/tasks/decisions.py`) used by the step routes, `/v1/approvals/{id}/approve|deny` and
+  bulk; the CLI prints a call's args (a diff for `patch_file`) before approving or denying.
+  Next is Phase 18 (approval tiers). Plan: `docs/gui-and-agent-loop-plan.md`.
 - The portability list below was written before Phase 16 and has not been re-audited. Check each
   item against the code before working on it.
 
@@ -61,18 +65,12 @@ Work in this order:
      against the protected-path check (`.env::$DATA`, `.env` with trailing space or dot, 8.3
      names like `GIT~1`).
    - `taskkill` is called with blocking `subprocess.run` inside async code.
-4. Then the big functional gap (below).
+4. The big functional gap (the agent loop) is closed: Phase 17.
 
 ## Still open from the October review
 
-- **Planner is one-shot.** `jarvis/tasks/planner.py` writes every step's tool input before any
-  step runs; step outputs are never fed back, tool-less steps are no-ops, and tasks end with no
-  answer to the user. Replace with an observe-act loop using native tool calling, approval per
-  tool call, and a final response.
-- **CLI approvals** (`jarvis/app/terminal.py`) never show `input_json` or a diff before approving.
-- **EventBus** (`jarvis/core/event_bus.py`) awaits `queue.put` into bounded queues; one slow
-  subscriber blocks every publisher. Drop or disconnect slow subscribers.
-- `python-dotenv` is imported by the daemon but not declared in `pyproject.toml`.
+Nothing. The one-shot planner, CLI approvals without args, the blocking EventBus and the
+undeclared `python-dotenv` are all fixed (Phase 17 and `pyproject.toml`).
 
 ## Running it
 
