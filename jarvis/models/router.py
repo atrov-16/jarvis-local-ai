@@ -43,6 +43,7 @@ class ModelRouter:
         primary = self._get_provider(primary_name)
 
         try:
+            self._require_tool_support(primary, request)
             return await primary.complete(request)
         except (MissingCredentialsError, InsufficientCreditsError) as e:
             # The primary cannot serve this request at all (no key / no credits) and retrying
@@ -56,7 +57,15 @@ class ModelRouter:
             if fallback is None:
                 raise
             self._log_fallback(primary_name, fallback, e)
-            return await fallback.complete(request)
+            try:
+                self._require_tool_support(fallback, request)
+                return await fallback.complete(request)
+            except UnsupportedFeatureError as unsupported:
+                # Keep the reason the primary failed; it is what the user can act on.
+                raise UnsupportedFeatureError(
+                    f"{e} Fallback provider '{fallback.name}' cannot serve this request: "
+                    f"{unsupported}"
+                ) from unsupported
         except ModelProviderError:
             # Other non-retryable provider errors
             raise
@@ -85,7 +94,16 @@ class ModelRouter:
         else:
             self._log_fallback(primary_name, fallback, error)
         try:
+            self._require_tool_support(fallback, request)
             return await fallback.complete(request)
+        except UnsupportedFeatureError as unsupported:
+            # The request needs something the fallback cannot do (tools). That is a different
+            # problem from the primary's, so it is not re-raised as the primary's error type
+            # (which callers read as "no credentials"/"no credits"): report both reasons.
+            raise UnsupportedFeatureError(
+                f"{error} Fallback provider '{fallback_name}' cannot serve this request: "
+                f"{unsupported}"
+            ) from unsupported
         except ModelProviderError as fallback_error:
             message = f"{error} Fallback provider '{fallback_name}' also failed: {fallback_error}"
             if isinstance(error, MissingCredentialsError) and isinstance(
@@ -112,6 +130,16 @@ class ModelRouter:
             for provider in self._providers.values()
         ]
         return list(await asyncio.gather(*tasks))
+
+    @staticmethod
+    def _require_tool_support(provider: ModelProvider, request: ModelRequest) -> None:
+        """A request that offers tools must never reach a provider that would drop them and
+        answer in plain text: the caller would take that text for the model's final answer."""
+        if request.wants_tools and not provider.supports_tools:
+            raise UnsupportedFeatureError(
+                f"Provider '{provider.name}' does not support tool calling, and this request "
+                "needs it."
+            )
 
     @staticmethod
     def _log_fallback(primary_name: str, fallback: ModelProvider, error: Exception) -> None:

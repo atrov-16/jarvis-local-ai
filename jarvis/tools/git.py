@@ -36,6 +36,27 @@ class GitOperation(str, Enum):
     PULL = "pull"
 
 
+# The operations `GitTool.execute` performs; the rest of `GitOperation` is reserved.
+SUPPORTED_OPERATIONS = (GitOperation.STATUS, GitOperation.DIFF, GitOperation.LOG)
+
+
+def _narrow_operation_enum(node: Any, supported: list[str]) -> int:
+    """Replace the `GitOperation` enum, wherever the schema states it, with `supported`.
+    Returns how many enums were replaced."""
+    all_operations = [operation.value for operation in GitOperation]
+    replaced = 0
+    if isinstance(node, dict):
+        if node.get("enum") == all_operations:
+            node["enum"] = list(supported)
+            replaced += 1
+        for value in node.values():
+            replaced += _narrow_operation_enum(value, supported)
+    elif isinstance(node, list):
+        for value in node:
+            replaced += _narrow_operation_enum(value, supported)
+    return replaced
+
+
 class GitToolInput(BaseModel):
     operation: GitOperation = Field(..., description="The Git operation to perform.")
     path: str | None = Field(None, description="Optional file or directory path for diff.")
@@ -55,6 +76,19 @@ class GitTool(BaseTool):
 
     def get_input_schema(self) -> type[BaseModel]:
         return GitToolInput
+
+    def llm_input_schema(self) -> dict[str, Any]:
+        """Advertise only the operations `execute` performs. `GitOperation` also names
+        reserved write operations; offering those to the model invites calls that can only
+        fail."""
+        schema = GitToolInput.model_json_schema()
+        supported = [operation.value for operation in SUPPORTED_OPERATIONS]
+        narrowed = _narrow_operation_enum(schema, supported)
+        if narrowed != 1:
+            raise RuntimeError(
+                f"Expected exactly one GitOperation enum in the git tool schema, found {narrowed}."
+            )
+        return schema
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:

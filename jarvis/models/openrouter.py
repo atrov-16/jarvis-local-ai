@@ -4,7 +4,6 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
-from pydantic import ValidationError
 
 from jarvis.config.secrets import SecretManager
 from jarvis.logging.redaction import redact_sensitive
@@ -24,12 +23,19 @@ from jarvis.models.schemas import (
     ProviderStatus,
     Usage,
 )
+from jarvis.models.tool_calls import (
+    parse_tool_calls,
+    to_openai_tool_calls,
+    to_openai_tool_choice,
+)
 
 # Error bodies are kept for diagnostics, but bounded: some gateways return whole HTML pages.
 MAX_ERROR_DETAIL_CHARS = 1000
 
 
 class OpenRouterProvider(ModelProvider):
+    supports_tools = True
+
     def __init__(
         self,
         secret_manager: SecretManager,
@@ -67,7 +73,7 @@ class OpenRouterProvider(ModelProvider):
                 self._handle_http_errors(response, api_key)
                 
                 data = response.json()
-                return self._parse_response(data)
+                return self._parse_response(data, api_key)
             except httpx.TimeoutException as e:
                 raise RetryableProviderError(
                     f"OpenRouter timeout: {self._sanitize(str(e), api_key)}"
@@ -124,11 +130,14 @@ class OpenRouterProvider(ModelProvider):
         return api_key
 
     def _build_payload(self, request: ModelRequest) -> dict[str, object]:
-        messages = []
+        messages: list[dict[str, object]] = []
         for msg in request.messages:
-            m = {"role": msg.role, "content": msg.content}
+            m: dict[str, object] = {"role": msg.role, "content": msg.content}
             if msg.tool_calls:
-                m["tool_calls"] = msg.tool_calls
+                m["tool_calls"] = to_openai_tool_calls(msg.tool_calls)
+                if not msg.content:
+                    # The API's form for "the reply was only tool calls".
+                    m["content"] = None
             if msg.tool_call_id:
                 m["tool_call_id"] = msg.tool_call_id
             messages.append(m)
@@ -143,14 +152,18 @@ class OpenRouterProvider(ModelProvider):
             payload["max_tokens"] = request.max_tokens
         if request.tools:
             payload["tools"] = request.tools
-            
+            if request.tool_choice is not None:
+                # Only meaningful (and only accepted) alongside `tools`.
+                payload["tool_choice"] = to_openai_tool_choice(request.tool_choice)
+
         return payload
 
-    def _parse_response(self, data: dict[str, object]) -> ModelResponse:
+    def _parse_response(self, data: object, api_key: str = "") -> ModelResponse:
+        self._raise_for_error_body(data, api_key)
         try:
             choice = data["choices"][0] # type: ignore
             message_data = choice["message"]
-            
+
             usage_data = data.get("usage", {}) # type: ignore
             usage = Usage(
                 prompt_tokens=usage_data.get("prompt_tokens", 0),
@@ -162,15 +175,49 @@ class OpenRouterProvider(ModelProvider):
                 message=Message(
                     role=message_data["role"],
                     content=message_data.get("content") or "",
-                    tool_calls=message_data.get("tool_calls"),
+                    tool_calls=parse_tool_calls(message_data.get("tool_calls")),
                 ),
                 finish_reason=choice.get("finish_reason"),
                 usage=usage,
                 provider_name=self.name,
-                model_used=str(data.get("model", "")),
+                model_used=str(data.get("model", "")), # type: ignore
             )
-        except (KeyError, IndexError, TypeError, AttributeError, ValidationError) as e:
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError) as e:
+            # ValueError covers pydantic's ValidationError and a malformed tool_calls list.
             raise ModelProviderError(f"OpenRouter response parsing failed: {e}") from e
+
+    def _raise_for_error_body(self, data: object, api_key: str) -> None:
+        """OpenRouter reports some failures (an upstream provider's rate limit or outage,
+        exhausted credits) as HTTP 200 with an `error` object, either instead of `choices` or
+        on the choice itself. Classify them like the equivalent HTTP status, so a tool-calling
+        loop retries or falls back instead of failing on "response parsing failed"."""
+        if not isinstance(data, dict):
+            return
+        error = data.get("error")
+        if error is None:
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                error = choices[0].get("error")
+        if not error:
+            return
+
+        code: object = None
+        message: object = error
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = error.get("message") or error
+        detail = self._sanitize(str(message)[:MAX_ERROR_DETAIL_CHARS], api_key)
+        status = code if isinstance(code, int) and not isinstance(code, bool) else None
+
+        if status in (401, 403):
+            raise AuthenticationError(f"OpenRouter authentication failed: {detail}")
+        if status == 402:
+            raise InsufficientCreditsError(
+                f"OpenRouter refused the request for insufficient credits (HTTP 402): {detail}"
+            )
+        if status in (408, 429) or (status is not None and status >= 500):
+            raise RetryableProviderError(f"OpenRouter upstream error ({status}): {detail}")
+        raise ModelProviderError(f"OpenRouter returned an error ({code}): {detail}")
 
     def _handle_http_errors(self, response: httpx.Response, api_key: str) -> None:
         if response.status_code == 200:

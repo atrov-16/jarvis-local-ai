@@ -45,6 +45,11 @@ class UnsupportedFeatureError(ModelProviderError):
 
 
 class ModelProvider(ABC):
+    # Whether `complete` honours `ModelRequest.tools` and returns `Message.tool_calls`. The
+    # router refuses to send a request that offers tools to a provider that does not, so a
+    # provider can never quietly answer a tool request in plain text.
+    supports_tools: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

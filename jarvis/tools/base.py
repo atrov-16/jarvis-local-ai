@@ -58,6 +58,15 @@ class BaseTool(ABC):
         """Return the Pydantic model for this tool's input."""
         pass
 
+    def llm_input_schema(self) -> dict[str, Any]:
+        """JSON schema of the inputs as advertised to the model.
+
+        Defaults to the input model's schema. A tool overrides this to advertise *less* than
+        its input model accepts (for example enum values it does not implement yet), never
+        more: the executor still validates every call against `get_input_schema()`.
+        """
+        return self.get_input_schema().model_json_schema()
+
     @abstractmethod
     async def execute(self, **kwargs: Any) -> ToolResult:
         """Perform the tool's core logic."""
