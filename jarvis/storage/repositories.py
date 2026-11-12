@@ -735,7 +735,10 @@ class TaskRepository:
         if not kwargs:
             return False
         
-        allowed_keys = {"status", "title", "priority", "metadata_json", "started_at", "completed_at", "claimed_at"}
+        allowed_keys = {
+            "status", "title", "priority", "metadata_json", "started_at", "completed_at",
+            "claimed_at", "final_answer",
+        }
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
         if not filtered_kwargs:
             return False
@@ -760,7 +763,8 @@ class TaskRepository:
         so concurrent transitions (e.g. a user cancel) are never overwritten.
         """
         allowed_keys = {
-            "title", "priority", "metadata_json", "started_at", "completed_at", "claimed_at"
+            "title", "priority", "metadata_json", "started_at", "completed_at", "claimed_at",
+            "final_answer",
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed_keys}
         set_clause = "".join(f", {k} = ?" for k in fields)
@@ -784,32 +788,39 @@ class TaskRepository:
         input_json: str | None = None,
         status: str = "pending",
         requires_approval: bool = False,
+        tool_call_id: str | None = None,
     ) -> str:
         step_id = id or str(uuid4())
         now = _now()
+        columns = [
+            "id", "task_id", "step_index", "title", "description", "tool_name",
+            "input_json", "status", "requires_approval", "created_at", "updated_at",
+        ]
+        values: list[object] = [
+            step_id, task_id, step_index, title, description, tool_name,
+            input_json, status, 1 if requires_approval else 0, now, now,
+        ]
+        if tool_call_id is not None:
+            # Named only when given, so this still works on a database from before
+            # migration 0016 (the migration tests seed such databases with this method).
+            columns.append("tool_call_id")
+            values.append(tool_call_id)
         await self._connection.execute(
-            """
-            INSERT INTO task_steps (
-                id, task_id, step_index, title, description, tool_name, 
-                input_json, status, requires_approval, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                step_id,
-                task_id,
-                step_index,
-                title,
-                description,
-                tool_name,
-                input_json,
-                status,
-                1 if requires_approval else 0,
-                now,
-                now,
-            ),
+            f"INSERT INTO task_steps ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' * len(columns))})",
+            tuple(values),
         )
         return step_id
+
+    async def get_step_by_tool_call_id(
+        self, task_id: str, tool_call_id: str
+    ) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM task_steps WHERE task_id = ? AND tool_call_id = ?",
+            (task_id, tool_call_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def get_step(self, step_id: str) -> dict[str, object] | None:
         cursor = await self._connection.execute("SELECT * FROM task_steps WHERE id = ?", (step_id,))
@@ -908,6 +919,60 @@ class TaskRepository:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def append_message(
+        self,
+        task_id: str,
+        *,
+        role: str,
+        content: str = "",
+        tool_calls: list[dict[str, object]] | None = None,
+        tool_call_id: str | None = None,
+    ) -> int:
+        """Add the next message of the task's conversation with the model; returns its `seq`.
+
+        `seq` counts up from 0 per task. It is taken inside the INSERT, so two writers in one
+        transaction cannot pick the same number (the primary key would reject a duplicate).
+        """
+        if role == "tool" and not tool_call_id:
+            raise ValueError("A tool message must name the call it answers (tool_call_id).")
+        if role != "tool" and tool_call_id:
+            raise ValueError("Only a tool message carries a tool_call_id.")
+        if tool_calls and role != "assistant":
+            raise ValueError("Only an assistant message carries tool_calls.")
+        cursor = await self._connection.execute(
+            """
+            INSERT INTO task_messages
+                (task_id, seq, role, content, tool_calls_json, tool_call_id, created_at)
+            SELECT ?, COALESCE(MAX(seq) + 1, 0), ?, ?, ?, ?, ?
+            FROM task_messages WHERE task_id = ?
+            RETURNING seq
+            """,
+            (
+                task_id,
+                role,
+                content,
+                json.dumps(tool_calls) if tool_calls else None,
+                tool_call_id,
+                _now(),
+                task_id,
+            ),
+        )
+        rows = list(await cursor.fetchall())  # drain the RETURNING cursor: the INSERT is done
+        return int(rows[0][0])
+
+    async def list_messages(self, task_id: str) -> list[dict[str, object]]:
+        """The task's conversation in order. `tool_calls` is the decoded list (or None)."""
+        cursor = await self._connection.execute(
+            "SELECT * FROM task_messages WHERE task_id = ? ORDER BY seq ASC", (task_id,)
+        )
+        messages: list[dict[str, object]] = []
+        for row in await cursor.fetchall():
+            data = dict(row)
+            raw_calls = data.pop("tool_calls_json")
+            data["tool_calls"] = json.loads(raw_calls) if raw_calls else None
+            messages.append(data)
+        return messages
 
 
 class ApprovalRepository:

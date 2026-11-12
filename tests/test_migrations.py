@@ -3,6 +3,7 @@
 All tests use disposable SQLite databases under pytest's tmp_path.
 """
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -145,7 +146,10 @@ async def test_upgrade_from_v14_preserves_all_dependent_records(tmp_path: Path, 
 
         # IDs, relationships and timestamps are unchanged.
         cursor = await conn.execute("SELECT * FROM tasks ORDER BY id")
-        assert [dict(r) for r in await cursor.fetchall()] == seeded["tasks_before"]
+        tasks_after = [dict(r) for r in await cursor.fetchall()]
+        # Migration 0016 added a column; it is empty for rows that predate it.
+        assert [row.pop("final_answer") for row in tasks_after] == [None, None]
+        assert tasks_after == seeded["tasks_before"]
         cursor = await conn.execute(
             "SELECT parent_task_id FROM tasks WHERE id = ?", (seeded["child"],)
         )
@@ -179,6 +183,84 @@ async def test_upgrade_from_v14_preserves_all_dependent_records(tmp_path: Path, 
         await conn.execute("DELETE FROM tasks WHERE id = ?", (seeded["child"],))
         cursor = await conn.execute("SELECT COUNT(*) FROM task_steps")
         assert (await cursor.fetchone())[0] == 0
+
+
+async def test_upgrade_from_v15_adds_agent_loop_storage_and_keeps_every_row(
+    tmp_path: Path, monkeypatch
+):
+    async with sqlite_connection(tmp_path / "v15.sqlite") as conn:
+        _only(monkeypatch, [m for m in ALL_MIGRATIONS if m.version < 16])
+        await run_migrations(conn)
+        assert await _versions(conn) == list(range(1, 16))
+        seeded = await _seed_pre_0015(conn)
+        before = await _counts(conn)
+        cursor = await conn.execute("SELECT * FROM task_steps ORDER BY id")
+        steps_before = [dict(r) for r in await cursor.fetchall()]
+        assert "final_answer" not in seeded["tasks_before"][0]
+        assert "tool_call_id" not in steps_before[0]
+
+        monkeypatch.undo()
+        applied = await run_migrations(conn)
+
+        assert applied == list(range(16, LATEST + 1))
+        assert await _counts(conn) == before
+
+        # Every existing row is identical; the new columns are empty for rows that predate them.
+        cursor = await conn.execute("SELECT * FROM tasks ORDER BY id")
+        tasks_after = [dict(r) for r in await cursor.fetchall()]
+        assert [row.pop("final_answer") for row in tasks_after] == [None, None]
+        assert tasks_after == seeded["tasks_before"]
+        cursor = await conn.execute("SELECT * FROM task_steps ORDER BY id")
+        steps_after = [dict(r) for r in await cursor.fetchall()]
+        assert [row.pop("tool_call_id") for row in steps_after] == [None, None, None]
+        assert steps_after == steps_before
+        assert await _fk_violations(conn) == []
+        assert await _foreign_keys_on(conn)
+
+        # The new storage works, and enforces what the agent loop relies on.
+        child, parent, steps = seeded["child"], seeded["parent"], seeded["steps"]
+        await conn.execute("UPDATE tasks SET final_answer = 'done' WHERE id = ?", (parent,))
+        insert_message = (
+            "INSERT INTO task_messages (task_id, seq, role, content, created_at) "
+            "VALUES (?, ?, ?, 'x', 'now')"
+        )
+        await conn.execute(insert_message, (child, 0, "user"))
+        await conn.execute(insert_message, (child, 1, "assistant"))
+        await conn.execute(insert_message, (parent, 0, "user"))  # seq is per task
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            await conn.execute(insert_message, (child, 1, "user"))
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            await conn.execute(insert_message, (child, 2, "narrator"))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            await conn.execute(insert_message, ("no-such-task", 0, "user"))
+
+        await conn.execute(
+            "UPDATE task_steps SET tool_call_id = 'call_1' WHERE id = ?", (steps[0],)
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            await conn.execute(
+                "UPDATE task_steps SET tool_call_id = 'call_1' WHERE id = ?", (steps[1],)
+            )
+        # (several steps without a call id are fine: the three seeded ones have none)
+        # The same id in another task is fine: ids are only unique within one conversation.
+        other = await conn.execute_insert(
+            "INSERT INTO tasks (id, title, user_request, status, created_at, updated_at) "
+            "VALUES ('t-other', 'o', 'o', 'queued', 'now', 'now')"
+        )
+        assert other is not None
+        await conn.execute(
+            "INSERT INTO task_steps (id, task_id, step_index, title, tool_call_id, "
+            "created_at, updated_at) VALUES ('s-other', 't-other', 0, 's', 'call_1', 'now', 'now')"
+        )
+
+        # Deleting a task takes its conversation and steps with it.
+        await conn.execute("DELETE FROM tasks WHERE id = ?", (child,))
+        count_messages = "SELECT COUNT(*) FROM task_messages WHERE task_id = ?"
+        cursor = await conn.execute(count_messages, (child,))
+        assert (await cursor.fetchone())[0] == 0
+        cursor = await conn.execute(count_messages, (parent,))
+        assert (await cursor.fetchone())[0] == 1
+        assert await _fk_violations(conn) == []
 
 
 async def test_fresh_database_initialisation(tmp_path: Path):

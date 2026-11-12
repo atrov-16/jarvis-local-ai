@@ -23,8 +23,10 @@ switching machines; pull when starting.
 - Platform-specific tests use the markers in `tests/_platforms.py` (`windows`, `macos`, `posix`).
   macOS/POSIX-marked tests added since the last Mac run are listed in
   `docs/mac-test-checklist.md`.
-- Phase 17 (the observe-act agent loop) is in progress on the same branch. The plan is
-  `docs/gui-and-agent-loop-plan.md`.
+- Phase 17 (the observe-act agent loop) is in progress on `phase16/checkpoint-paused` (draft PR
+  #1). Done: slice 1 native tool calling, slice 2 non-blocking EventBus, slice 3 migration 0016
+  (`tasks.final_answer`, `task_steps.tool_call_id`, `task_messages`). Next: slice 4 (the loop,
+  replaces the planner), slice 5 (API/CLI/events). Plan: `docs/gui-and-agent-loop-plan.md`.
 - The portability list below was written before Phase 16 and has not been re-audited. Check each
   item against the code before working on it.
 
