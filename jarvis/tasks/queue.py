@@ -277,8 +277,16 @@ class TaskQueue:
 
                 approval_request_id = approval_req["id"]
 
-            # 2. Mark step as running. The step_started event carries the approval id; it is
-            # written in this same transaction and marks the approval as consumed.
+            # 2. Mark step as running, but only if the task is still running: a cancel that
+            # landed after the loop's last check must stop the call here. The no-op
+            # compare-and-set takes the write lock, so the check and the start are atomic.
+            if not await unit.repositories.tasks.transition(
+                task_id, "running", from_statuses=("running",)
+            ):
+                LOG.info(f"Task {task_id} stopped running; not starting step {step_id}.")
+                return StepOutcome.STOPPED
+            # The step_started event carries the approval id; it is written in this same
+            # transaction and marks the approval as consumed.
             await unit.repositories.tasks.update_step(
                 step_id,
                 status="running",

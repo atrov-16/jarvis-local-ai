@@ -393,6 +393,38 @@ async def test_cancelling_during_a_tool_call_stops_the_loop(uow, bus, registry, 
     assert model.remaining == 1
 
 
+async def test_a_cancel_after_the_last_check_stops_the_call_before_it_runs(
+    uow, bus, registry, tools
+):
+    # Review finding (P3): a cancel landing between the loop's "still running?" check and the
+    # step being marked running used to let the call run anyway. Starting a call must be
+    # conditional on the task still running, in the same transaction.
+    from jarvis.tasks.agent_loop import AgentLoop
+
+    model = ScriptedModel(
+        tool_reply(("echo", {"text": "hi"}, "c1")), text_reply("must not be asked")
+    )
+    queue = make_queue(uow, bus, registry, model)
+    task_id = await new_task(uow)
+    original = AgentLoop._still_running
+
+    async def check_then_cancel(self, tid):
+        still = await original(self, tid)
+        async with uow.begin() as unit:
+            await unit.repositories.tasks.transition(tid, "cancelled", from_statuses=("running",))
+        return still
+
+    with patch.object(AgentLoop, "_still_running", check_then_cancel):
+        await asyncio.wait_for(run_task(queue, task_id), 5)
+
+    snap = await snapshot(uow, task_id)
+    assert snap["task"]["status"] == "cancelled"
+    assert tools["echo"].calls == []
+    assert [s["status"] for s in snap["steps"]] != ["running"]
+    assert all(s["status"] != "completed" for s in snap["steps"])
+    assert model.remaining == 1
+
+
 async def test_cancelling_while_the_model_answers_discards_the_answer(uow, bus, registry):
     task_id = await new_task(uow)
 

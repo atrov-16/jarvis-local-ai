@@ -80,6 +80,7 @@ class StepOutcome(Enum):
     COMPLETED = "completed"
     PAUSED = "paused"  # Waiting for approval; not a failure.
     FAILED = "failed"  # The tool failed. The model is told; the task goes on.
+    STOPPED = "stopped"  # The task stopped running (e.g. cancelled) before the call started.
 
 
 def title_from_request(user_request: str) -> str:
@@ -424,7 +425,7 @@ class AgentLoop:
                     task_id, f"Daemon shutdown while step '{step['title']}' was executing"
                 )
                 raise
-            if outcome is StepOutcome.PAUSED:
+            if outcome in (StepOutcome.PAUSED, StepOutcome.STOPPED):
                 return False
 
         return await self._record_results(task_id, calls)
