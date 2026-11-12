@@ -449,6 +449,26 @@ def test_task_approve_with_an_explicit_step_also_shows_what_it_approves(
 
 
 @patch("jarvis.app.terminal._get_api_client")
+def test_a_step_that_is_not_waiting_is_not_presented_as_being_decided(
+    mock_client_ctx: MagicMock,
+) -> None:
+    # QA finding: "Denying: <args>" was printed for a step that had already completed, right
+    # before the server refused the decision.
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    task = _waiting_task("generic_command", {"binary": "rm", "args": ["x"]}, status="completed")
+    task["status"] = "completed"
+    _serve(mock_client, task)
+
+    deny = runner.invoke(app, ["task", "deny", "task-args", "--step", "step-args"])
+    approve = runner.invoke(app, ["task", "approve", "task-args", "--step", "step-args"])
+
+    for result in (deny, approve):
+        assert "Denying:" not in result.stdout and "Approving:" not in result.stdout
+        assert "binary: rm" not in result.stdout
+
+
+@patch("jarvis.app.terminal._get_api_client")
 def test_task_deny_also_shows_what_it_denies(mock_client_ctx: MagicMock) -> None:
     mock_client = MagicMock()
     mock_client_ctx.return_value.__enter__.return_value = mock_client

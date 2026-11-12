@@ -559,6 +559,13 @@ def _find_step(steps: object, step_id: str) -> dict | None:
     return None
 
 
+def _waiting_call(steps: object, step_id: str) -> dict | None:
+    """The step to show before deciding it: only one that is really waiting for a decision.
+    Anything else is left to the server's refusal rather than presented as being decided."""
+    step = _find_step(steps, step_id)
+    return step if step is not None and step.get("status") == "waiting_for_approval" else None
+
+
 @task_app.command("submit")
 def task_submit(
     request: str,
@@ -786,7 +793,7 @@ def task_approve(
                         break
 
             # Show exactly what is being approved before approving it.
-            shown = _find_step(task_steps, step)
+            shown = _waiting_call(task_steps, step)
             if shown is not None:
                 console.print(Text("Approving:", style="bold"))
                 _print_call(shown)
@@ -825,7 +832,7 @@ def task_deny(
                         step = s["id"]
                         break
 
-            shown = _find_step(task_steps, step)
+            shown = _waiting_call(task_steps, step)
             if shown is not None:
                 console.print(Text("Denying:", style="bold"))
                 _print_call(shown)
