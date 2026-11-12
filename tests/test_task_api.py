@@ -1,6 +1,9 @@
 """Tests for Task API endpoints."""
 
+import time
+
 import pytest
+from _agent_helpers import EchoTool, ScriptedModel, text_reply, tool_reply
 from fastapi.testclient import TestClient
 
 from jarvis.api.http import create_app
@@ -59,40 +62,48 @@ def test_task_get_detail(client):
     assert "events" in task
     assert len(task["steps"]) == 0
 
-def test_task_approve_plan(client):
+def test_the_retired_plan_approval_endpoint_is_gone(client):
     headers = {"Authorization": "Bearer test-token"}
-    response = client.post("/v1/tasks", headers=headers, json={"user_request": "Test"})
-    task_id = response.json()["id"]
-    
-    # Approve plan should fail initially because status is 'queued'
-    response = client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers)
-    assert response.status_code == 400
-    
-    # Wait, need a way to mock the worker or manipulate DB to test transitions
-    # Use internal state
-    import asyncio
-    async def set_status():
-        async with client.app.state.task_queue._uow.begin() as unit:
-            await unit.repositories.tasks.update(task_id, status="waiting_for_plan_approval")
-    asyncio.run(set_status())
+    task_id = client.post("/v1/tasks", headers=headers, json={"user_request": "Test"}).json()["id"]
 
-    # Plan approval requires a plan approval request bound to the task.
-    response = client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers)
-    assert response.status_code == 409
+    assert client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers).status_code == 404
 
-    async def create_plan_request():
-        async with client.app.state.task_queue._uow.begin() as unit:
-            await unit.repositories.approvals.insert(
-                task_id=task_id, action_type="plan", risk_level="medium",
-                summary="Approve plan", action_json="{}", action_hash="h",
-            )
-    asyncio.run(create_plan_request())
 
-    response = client.post(f"/v1/tasks/{task_id}/plan/approve", headers=headers)
-    assert response.status_code == 200
-    
-    response = client.get(f"/v1/tasks/{task_id}", headers=headers)
-    assert response.json()["status"] == "queued"
+def test_task_title_comes_from_the_request(client):
+    headers = {"Authorization": "Bearer test-token"}
+    response = client.post(
+        "/v1/tasks", headers=headers, json={"user_request": "Fix the login bug\nit crashes"}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["title"] == "Fix the login bug"
+    assert response.json()["final_answer"] is None
+
+
+def test_task_runs_to_a_final_answer_returned_by_the_api(client):
+    headers = {"Authorization": "Bearer test-token"}
+    echo = EchoTool()
+    client.app.state.task_queue._tool_executor._registry.register(echo)
+    model = ScriptedModel(
+        tool_reply(("echo", {"text": "hi"}, "call_1")), text_reply("It said hi.")
+    )
+    client.app.state.model_router.complete = model.complete
+
+    task_id = client.post("/v1/tasks", headers=headers, json={"user_request": "Say hi"}).json()["id"]
+    deadline = time.monotonic() + 15
+    while True:
+        task = client.get(f"/v1/tasks/{task_id}", headers=headers).json()
+        if task["status"] in ("completed", "failed") or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
+
+    assert task["status"] == "completed"
+    assert task["final_answer"] == "It said hi."
+    assert [(s["tool_name"], s["status"]) for s in task["steps"]] == [("echo", "completed")]
+    assert echo.calls == [{"text": "hi"}]
+    listed = client.get("/v1/tasks", headers=headers).json()
+    assert [t["final_answer"] for t in listed if t["id"] == task_id] == ["It said hi."]
+
 
 def test_task_resume(client):
     headers = {"Authorization": "Bearer test-token"}

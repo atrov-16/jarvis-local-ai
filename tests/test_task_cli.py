@@ -71,18 +71,66 @@ def test_task_status(mock_client_ctx: MagicMock) -> None:
     assert "Main Task" in result.stdout
     assert "S2" in result.stdout
 
+def _task_with_steps(mock_client: MagicMock, statuses: list[str]) -> None:
+    detail = {
+        "id": "t1",
+        "steps": [{"id": f"s{i}", "status": status} for i, status in enumerate(statuses)],
+    }
+
+    def get(url: str) -> MagicMock:
+        response = MagicMock()
+        response.json.return_value = [{"id": "t1"}] if url == "/v1/tasks" else detail
+        return response
+
+    mock_client.get.side_effect = get
+
+
 @patch("jarvis.app.terminal._get_api_client")
-def test_task_approve(mock_client_ctx: MagicMock) -> None:
+def test_task_approve_without_step_approves_the_one_waiting_step(
+    mock_client_ctx: MagicMock,
+) -> None:
     mock_client = MagicMock()
     mock_client_ctx.return_value.__enter__.return_value = mock_client
-    
-    mock_resp = MagicMock()
-    mock_client.post.return_value = mock_resp
+    _task_with_steps(mock_client, ["completed", "waiting_for_approval"])
 
     result = runner.invoke(app, ["task", "approve", "t1"])
+
     assert result.exit_code == 0
-    assert "Task plan approved: t1" in result.stdout
-    mock_client.post.assert_called_with("/v1/tasks/t1/plan/approve")
+    assert "Task step approved: s1" in result.stdout
+    mock_client.post.assert_called_once_with(
+        "/v1/tasks/t1/steps/s1/approve", json={"reason": None}
+    )
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_approve_without_step_fails_when_nothing_is_waiting(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _task_with_steps(mock_client, ["completed"])
+
+    result = runner.invoke(app, ["task", "approve", "t1"])
+
+    assert result.exit_code == 1
+    assert "not waiting for approval" in result.stdout
+    mock_client.post.assert_not_called()
+
+
+@patch("jarvis.app.terminal._get_api_client")
+def test_task_approve_without_step_refuses_to_guess_between_several(
+    mock_client_ctx: MagicMock,
+) -> None:
+    mock_client = MagicMock()
+    mock_client_ctx.return_value.__enter__.return_value = mock_client
+    _task_with_steps(mock_client, ["waiting_for_approval", "waiting_for_approval"])
+
+    result = runner.invoke(app, ["task", "approve", "t1"])
+
+    assert result.exit_code == 1
+    assert "--step" in result.stdout
+    mock_client.post.assert_not_called()
+
 
 @patch("jarvis.app.terminal._get_api_client")
 def test_task_approve_step(mock_client_ctx: MagicMock) -> None:

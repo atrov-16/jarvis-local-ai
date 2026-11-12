@@ -190,6 +190,8 @@ class TaskResponse(BaseModel):
     started_at: str | None = None
     completed_at: str | None = None
     claimed_at: str | None = None
+    # The model's closing reply to the user; set when the task completes.
+    final_answer: str | None = None
 
 
 class TraceEntry(BaseModel):

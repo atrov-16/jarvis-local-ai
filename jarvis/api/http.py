@@ -75,7 +75,7 @@ from jarvis.storage.connection import resolve_database_path, sqlite_connection
 from jarvis.storage.migrations import run_migrations
 from jarvis.storage.unit_of_work import UnitOfWork, UnitOfWorkScope
 from jarvis.tasks.command_runner import CommandRunner
-from jarvis.tasks.planner import Planner
+from jarvis.tasks.agent_loop import title_from_request
 from jarvis.tasks.queue import TaskQueue
 from jarvis.tools.build_runner import BuildTool
 from jarvis.tools.executor import ToolExecutor
@@ -152,8 +152,15 @@ def create_app(
     registry.register(GetTaskStatusTool())
     tool_executor = ToolExecutor(registry, approval_broker)
 
-    planner = Planner(model_router, registry)
-    task_queue = TaskQueue(uow, bus, planner, tool_executor, approval_broker)
+    task_queue = TaskQueue(
+        uow,
+        bus,
+        model_router,
+        tool_executor,
+        approval_broker,
+        max_turns=jarvis_config.tasks.max_turns,
+        max_tool_calls_per_turn=jarvis_config.tasks.max_tool_calls_per_turn,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -534,7 +541,7 @@ def create_app(
         async with uow.begin() as unit:
             assert unit.repositories is not None
             task_id = await unit.repositories.tasks.insert(
-                title="New Task",  # Will be updated by Planner
+                title=title_from_request(data.user_request),
                 user_request=data.user_request,
                 project_id=project_id,
                 priority=data.priority,
@@ -607,56 +614,6 @@ def create_app(
             )
         except TaskNotFoundError:
             raise HTTPException(status_code=404, detail="Task not found.") from None
-
-    @app.post("/v1/tasks/{task_id}/plan/approve")
-    async def approve_task_plan(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
-        async with uow.begin() as unit:
-            assert unit.repositories is not None
-            task = await unit.repositories.tasks.get(task_id)
-            if not task:
-                raise HTTPException(status_code=404, detail="Task not found.")
-            
-            if task["status"] != "waiting_for_plan_approval":
-                raise HTTPException(status_code=400, detail=f"Task is not waiting for plan approval (status: {task['status']})")
-                
-            # The plan must have a valid approval request bound to this task.
-            plan_request = await unit.repositories.approvals.get_latest_for_task(task_id, "plan")
-            if not plan_request:
-                raise HTTPException(
-                    status_code=409, detail="No plan approval request exists for this task."
-                )
-            if plan_request["status"] == "pending":
-                if not await approval_broker.approve(plan_request["id"], unit=unit):
-                    raise HTTPException(
-                        status_code=409, detail="Plan approval request is no longer pending."
-                    )
-            elif plan_request["status"] != "approved":
-                # 'approved' (e.g. via the approval center) is valid consent; anything else is not.
-                raise HTTPException(
-                    status_code=409, detail=f"Plan approval request is {plan_request['status']}."
-                )
-
-            if not await unit.repositories.tasks.transition(
-                task_id, "queued", from_statuses=("waiting_for_plan_approval",)
-            ):
-                raise HTTPException(
-                    status_code=409, detail="Task state changed; plan not approved."
-                )
-            await unit.repositories.tasks.insert_event(
-                task_id=task_id,
-                event_type="status_change",
-                message="Plan approved by user",
-                payload={"status": "queued"},
-                correlation_id=plan_request["id"],
-            )
-            await unit.repositories.audit.insert(
-                actor="user",
-                action_type="task.plan_approve",
-                summary=f"Approved plan for task: {task_id}",
-                target=task_id,
-                task_id=task_id,
-            )
-        return JSONResponse({"approved": True})
 
     @app.post("/v1/tasks/{task_id}/resume")
     async def resume_task(task_id: str, _: None = Depends(require_api_token)) -> JSONResponse:
@@ -782,7 +739,8 @@ def create_app(
         data: TaskDecisionRequest,
         _: None = Depends(require_api_token),
     ) -> TaskStepResponse:
-        """Deny a paused task step, failing the task."""
+        """Deny a paused task step. The call is not run; the task goes back in the queue and the
+        agent loop tells the model the user denied it, so the model can adapt."""
         async with uow.begin() as unit:
             assert unit.repositories is not None
             request = await _load_step_awaiting_decision(unit, task_id, step_id)
@@ -794,14 +752,17 @@ def create_app(
                 )
 
             tasks = unit.repositories.tasks
-            error_msg = f"Denied by user: {data.reason}" if data.reason else "Denied by user."
+            # 'skipped' is the step's final state; this text is what the model is told.
+            error_msg = "the user denied this call."
+            if data.reason:
+                error_msg += f" Reason: {data.reason}"
             if not await tasks.transition_step(
-                step_id, "failed", from_statuses=("waiting_for_approval",), error=error_msg
+                step_id, "skipped", from_statuses=("waiting_for_approval",), error=error_msg
             ):
                 raise HTTPException(status_code=409, detail="Step state changed; not denied.")
-            if not await tasks.transition(task_id, "failed", from_statuses=("paused",)):
+            if not await tasks.transition(task_id, "queued", from_statuses=("paused",)):
                 raise HTTPException(status_code=409, detail="Task state changed; not denied.")
-            
+
             await tasks.insert_event(
                 task_id=task_id,
                 step_id=step_id,
@@ -814,9 +775,8 @@ def create_app(
                 task_id=task_id,
                 step_id=step_id,
                 event_type="status_change",
-                message=f"Task failed: {error_msg}",
-                payload={"status": "failed", "error": error_msg},
-                severity="error",
+                message="Task queued after step denial; the model will be told",
+                payload={"status": "queued"},
                 correlation_id=request["id"],
             )
             

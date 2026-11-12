@@ -24,9 +24,13 @@ switching machines; pull when starting.
   macOS/POSIX-marked tests added since the last Mac run are listed in
   `docs/mac-test-checklist.md`.
 - Phase 17 (the observe-act agent loop) is in progress on `phase16/checkpoint-paused` (draft PR
-  #1). Done: slice 1 native tool calling, slice 2 non-blocking EventBus, slice 3 migration 0016
-  (`tasks.final_answer`, `task_steps.tool_call_id`, `task_messages`). Next: slice 4 (the loop,
-  replaces the planner), slice 5 (API/CLI/events). Plan: `docs/gui-and-agent-loop-plan.md`.
+  #1). Done: slice 1 native tool calling, slice 2 non-blocking EventBus, slice 3 migration 0016,
+  slice 4 the loop (`jarvis/tasks/agent_loop.py` replaced the planner; no plan approval; a denied
+  or failed tool call is reported to the model instead of failing the task; `final_answer` and
+  `/summary` coexist; defaults 15 turns / 5 calls per turn in `TasksConfig`). Next: slice 5
+  (API response fields, events after commit, `GET /v1/tasks/{id}/events?since=`,
+  `/v1/approvals/{id}/approve` driving transitions, CLI shows args before approving).
+  Plan: `docs/gui-and-agent-loop-plan.md`.
 - The portability list below was written before Phase 16 and has not been re-audited. Check each
   item against the code before working on it.
 

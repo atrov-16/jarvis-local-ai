@@ -1,223 +1,131 @@
-"""Approval and notification tests for Phase 6."""
+"""Approval flow through the HTTP API and the real worker (Phase 6, ported to the agent loop).
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+A mutating tool call pauses the task; approving runs it once and the model answers; denying
+tells the model, which adapts. Ownership and replay rules are in test_approval_enforcement.py.
+"""
+
+import time
 
 import pytest
+from _agent_helpers import ScriptedModel, WriteTool, text_reply, tool_reply
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
 
 from jarvis.api.http import create_app
 from jarvis.config.models import JarvisConfig, MemoryConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
-from jarvis.storage.connection import sqlite_connection
-from jarvis.storage.migrations import run_migrations
-from jarvis.storage.unit_of_work import UnitOfWork
-from jarvis.tasks.planner import PlannedStep, PlannedTask
-from jarvis.tools.base import ToolCategory, ToolResult
 
 
 @pytest.fixture
-def event_bus():
-    return EventBus()
-
-@pytest.fixture
-async def uow(tmp_path):
+def app(tmp_path):
     db_path = tmp_path / "test_approvals.sqlite"
-    async with sqlite_connection(db_path) as conn:
-        await run_migrations(conn)
-    return UnitOfWork(db_path)
-
-@pytest.fixture
-def app(uow, event_bus, tmp_path):
-    config = JarvisConfig(memory=MemoryConfig(database_path=tmp_path / "test_approvals.sqlite"))
-    secret_manager = SecretManager({"JARVIS_API_TOKEN": "test-token"}, use_keyring=False)
     return create_app(
-        config=config,
-        secret_manager=secret_manager,
-        event_bus=event_bus,
-        database_path=tmp_path / "test_approvals.sqlite"
+        config=JarvisConfig(memory=MemoryConfig(database_path=db_path)),
+        secret_manager=SecretManager({"JARVIS_API_TOKEN": "test-token"}, use_keyring=False),
+        event_bus=EventBus(),
+        database_path=db_path,
     )
+
 
 @pytest.fixture
 def client(app):
     with TestClient(app) as c:
         c.headers["Authorization"] = "Bearer test-token"
-        resp = c.post("/v1/projects", json={"name": "test-project"})
-        project_id = resp.json()["id"]
+        project_id = c.post("/v1/projects", json={"name": "test-project"}).json()["id"]
         c.post("/v1/projects/current", json={"id": project_id})
         yield c
 
-@pytest.fixture
-def mock_planner(app):
-    planner = MagicMock()
-    app.state.task_queue._planner = planner
-    return planner
 
 @pytest.fixture
-def registry(app):
-    return app.state.task_queue._tool_executor._registry
+def write_tool(app):
+    tool = WriteTool()
+    app.state.task_queue._tool_executor._registry.register(tool)
+    return tool
 
-@pytest.mark.asyncio
-async def test_mutating_tool_requires_approval_by_policy(client, uow, registry, mock_planner, app):
-    # 1. Setup a workspace with 'approval_required' policy
-    async with uow.begin() as unit:
-        ws_id = await unit.repositories.workspaces.insert(
-            name="Secure", path="C:/secure", write_policy="approval_required"
-        )
-        project_id = await unit.repositories.projects.insert(name="SecureProject")
 
-        await unit.repositories.projects.link_workspace(project_id, ws_id)
+def script(app, *replies) -> ScriptedModel:
+    model = ScriptedModel(*replies)
+    app.state.model_router.complete = model.complete
+    return model
 
-    # 2. Register a mutating tool
-    class MutatingInput(BaseModel):
-        pass
 
-    class MutatingTool(MagicMock):
-        name = "mutating_tool"
-        description = "Mutates things"
-        category = ToolCategory.MUTATING
-        timeout_seconds = 60
-        def get_input_schema(self):
-            return MutatingInput
-        async def execute(self, **kwargs):
-            return ToolResult(success=True, data="done")
+def wait_for(client, task_id, predicate, timeout=15.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while True:
+        task = client.get(f"/v1/tasks/{task_id}").json()
+        if predicate(task):
+            return task
+        if time.monotonic() > deadline:
+            raise AssertionError(f"Timed out; the task is {task['status']}.")
+        time.sleep(0.1)
 
-    tool = MutatingTool()
-    registry.register(tool)
 
-    # 3. Setup planner to return a step with this tool, but NOT flagging approval
-    # The TaskQueue should catch it anyway due to workspace policy.
-    mock_planner.create_plan = AsyncMock(return_value=PlannedTask(
-        title="Mutate Task",
-        steps=[PlannedStep(title="Mutate", description="...", tool_name="mutating_tool", requires_approval=False)]
-    ))
+def waiting_step(task) -> bool:
+    return any(s["status"] == "waiting_for_approval" for s in task["steps"])
 
-    # 4. Create task
-    resp = client.post("/v1/tasks", json={"user_request": "mutate", "project_id": project_id})
-    task_id = resp.json()["id"]
 
-    # Wait for plan approval
-    max_wait = 20
-    while max_wait > 0:
-        resp = client.get(f"/v1/tasks/{task_id}")
-        if resp.json()["status"] == "waiting_for_plan_approval":
-            break
-        await asyncio.sleep(0.1)
-        max_wait -= 1
-    
-    # Approve plan
-    client.post(f"/v1/tasks/{task_id}/plan/approve")
+def test_mutating_tool_requires_approval_then_runs_once_and_the_model_answers(
+    client, app, write_tool
+):
+    model = script(
+        app, tool_reply(("write", {"text": "hello"}, "call_1")), text_reply("Wrote hello.")
+    )
+    task_id = client.post("/v1/tasks", json={"user_request": "Write hello"}).json()["id"]
 
-    # 5. Wait for it to hit 'waiting_for_approval'
-    max_wait = 20
-    while max_wait > 0:
-        resp = client.get(f"/v1/tasks/{task_id}")
-        task = resp.json()
-        if any(s["status"] == "waiting_for_approval" for s in task["steps"]):
-            break
-        await asyncio.sleep(0.1)
-        max_wait -= 1
-
+    task = wait_for(client, task_id, waiting_step)
     assert task["status"] == "paused"
     step = next(s for s in task["steps"] if s["status"] == "waiting_for_approval")
-    assert step["title"] == "Mutate"
-    
-    # Verify 'approval_requested' event
-    events = [e for e in task["events"] if e["event_type"] == "approval_requested"]
-    assert len(events) > 0
+    assert step["title"] == "write: hello"
+    assert step["input_json"] == '{"text": "hello"}'
+    assert write_tool.calls == []  # nothing ran before approval
+    assert any(e["event_type"] == "approval_requested" for e in task["events"])
+    assert client.get("/v1/approvals").json()  # the request is listed for the user to decide
 
-    # 6. Approve the step
-    resp = client.post(f"/v1/tasks/{task_id}/steps/{step['id']}/approve", json={"reason": "I trust you"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "approved"
+    resp = client.post(
+        f"/v1/tasks/{task_id}/steps/{step['id']}/approve", json={"reason": "I trust you"}
+    )
+    assert resp.status_code == 200 and resp.json()["status"] == "approved"
 
-    # 7. Wait for completion
-    max_wait = 20
-    while max_wait > 0:
-        resp = client.get(f"/v1/tasks/{task_id}")
-        if resp.json()["status"] == "completed":
-            break
-        await asyncio.sleep(0.1)
-        max_wait -= 1
+    task = wait_for(client, task_id, lambda t: t["status"] == "completed")
+    assert task["final_answer"] == "Wrote hello."
+    assert write_tool.calls == [{"text": "hello"}]  # exactly once
+    granted = [e for e in task["events"] if e["event_type"] == "approval_granted"]
+    assert granted and "I trust you" in granted[0]["payload_json"]
+    assert model.roles(1) == ["system", "user", "assistant", "tool"]  # the result went back
 
-    assert resp.json()["status"] == "completed"
-    
-    # Verify 'approval_granted' event
-    events = [e for e in resp.json()["events"] if e["event_type"] == "approval_granted"]
-    assert len(events) > 0
-    assert events[0]["payload_json"] is not None
-    assert "I trust you" in events[0]["payload_json"]
 
-@pytest.mark.asyncio
-async def test_step_denial_fails_task(client, uow, registry, mock_planner):
-    # Setup similar to above but deny
-    async with uow.begin() as unit:
-        ws_id = await unit.repositories.workspaces.insert(
-            name="Secure2", path="C:/secure2", write_policy="approval_required"
-        )
-        project_id = await unit.repositories.projects.insert(name="SecureProject2")
-        await unit.repositories.projects.link_workspace(project_id, ws_id)
-
-    # Re-use mutating_tool if already registered, or skip if duplicate
-    try:
-        class MutatingInput(BaseModel):
-            pass
-        class MutatingTool(MagicMock):
-            name = "mutating_tool_2"
-            description = "Mutates things"
-            category = ToolCategory.MUTATING
-            timeout_seconds = 60
-            def get_input_schema(self):
-                return MutatingInput
-            async def execute(self, **kwargs):
-                return ToolResult(success=True, data="done")
-        registry.register(MutatingTool())
-    except ValueError:
-        pass
-
-    mock_planner.create_plan = AsyncMock(return_value=PlannedTask(
-        title="Mutate Task 2",
-        steps=[PlannedStep(title="Mutate", description="...", tool_name="mutating_tool_2" if "mutating_tool_2" in registry._tools else "mutating_tool", requires_approval=False)]
-    ))
-
-    # 4. Create task
-    resp = client.post("/v1/tasks", json={"user_request": "mutate", "project_id": project_id})
-    task_id = resp.json()["id"]
-
-    # Wait for plan approval
-    max_wait = 20
-    while max_wait > 0:
-        resp = client.get(f"/v1/tasks/{task_id}")
-        if resp.json()["status"] == "waiting_for_plan_approval":
-            break
-        await asyncio.sleep(0.1)
-        max_wait -= 1
-    
-    # Approve plan
-    client.post(f"/v1/tasks/{task_id}/plan/approve")
-
-    # 5. Wait for it to hit 'waiting_for_approval'
-    max_wait = 20
-    while max_wait > 0:
-        task = client.get(f"/v1/tasks/{task_id}").json()
-        if any(s["status"] == "waiting_for_approval" for s in task["steps"]):
-            break
-        await asyncio.sleep(0.1)
-        max_wait -= 1
-
+def test_denying_a_call_tells_the_model_which_adapts(client, app, write_tool):
+    model = script(
+        app,
+        tool_reply(("write", {"text": "hello"}, "call_1")),
+        text_reply("I could not write it because you denied the change."),
+    )
+    task_id = client.post("/v1/tasks", json={"user_request": "Write hello"}).json()["id"]
+    task = wait_for(client, task_id, waiting_step)
     step = next(s for s in task["steps"] if s["status"] == "waiting_for_approval")
-    
-    # Deny
-    resp = client.post(f"/v1/tasks/{task_id}/steps/{step['id']}/deny", json={"reason": "Too risky"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "failed"
-    
-    task = client.get(f"/v1/tasks/{task_id}").json()
-    assert task["status"] == "failed"
-    
-    # Verify 'approval_denied' event
-    events = [e for e in task["events"] if e["event_type"] == "approval_denied"]
-    assert len(events) > 0
-    assert "Too risky" in events[0]["payload_json"]
+
+    resp = client.post(
+        f"/v1/tasks/{task_id}/steps/{step['id']}/deny", json={"reason": "Too risky"}
+    )
+    assert resp.status_code == 200 and resp.json()["status"] == "skipped"
+
+    task = wait_for(client, task_id, lambda t: t["status"] == "completed")
+    assert task["final_answer"].startswith("I could not write it")
+    assert write_tool.calls == []
+    denied = [e for e in task["events"] if e["event_type"] == "approval_denied"]
+    assert denied and "Too risky" in denied[0]["payload_json"]
+    told = model.requests[1].messages[-1]
+    assert (told.role, told.tool_call_id) == ("tool", "call_1")
+    assert told.content == "Not run: the user denied this call. Reason: Too risky"
+
+
+def test_a_denied_call_cannot_be_approved_later(client, app, write_tool):
+    script(app, tool_reply(("write", {"text": "x"}, "call_1")), text_reply("ok"))
+    task_id = client.post("/v1/tasks", json={"user_request": "Write x"}).json()["id"]
+    task = wait_for(client, task_id, waiting_step)
+    step_id = next(s["id"] for s in task["steps"] if s["status"] == "waiting_for_approval")
+    assert client.post(f"/v1/tasks/{task_id}/steps/{step_id}/deny", json={}).status_code == 200
+    wait_for(client, task_id, lambda t: t["status"] == "completed")
+
+    assert client.post(f"/v1/tasks/{task_id}/steps/{step_id}/approve", json={}).status_code == 409
+    assert write_tool.calls == []

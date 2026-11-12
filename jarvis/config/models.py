@@ -43,6 +43,9 @@ class ApprovalsConfig(BaseModel):
 class TasksConfig(BaseModel):
     max_active_tasks: int = 1
     default_command_timeout_seconds: int = 120
+    # Agent loop limits. Reaching max_turns without a final answer fails the task.
+    max_turns: int = Field(default=15, ge=1)
+    max_tool_calls_per_turn: int = Field(default=5, ge=1)
 
 
 class SecurityConfig(BaseModel):

@@ -710,7 +710,7 @@ def task_approve(
     step: str | None = typer.Option(None, "--step", "-s", help="Approve a specific step (tool approval)."),
     config: Path | None = typer.Option(None, "--config", "-c"),
 ) -> None:
-    """Approve a task plan or tool execution step."""
+    """Approve the tool call a paused task is waiting on."""
     with _get_api_client(config) as client:
         try:
             if len(task_id) < 36:
@@ -721,22 +721,39 @@ def task_approve(
                         task_id = t["id"]
                         break
 
-            if step:
-                if len(step) < 36:
-                    resp_s = client.get(f"/v1/tasks/{task_id}")
-                    resp_s.raise_for_status()
-                    for s in resp_s.json().get("steps", []):
-                        if s["id"].startswith(step):
-                            step = s["id"]
-                            break
+            if not step:
+                # Tasks have no plan to approve: the only thing to approve is a tool call
+                # the task is waiting on. Use it if there is exactly one.
+                resp_s = client.get(f"/v1/tasks/{task_id}")
+                resp_s.raise_for_status()
+                waiting = [
+                    s for s in resp_s.json().get("steps", [])
+                    if s["status"] == "waiting_for_approval"
+                ]
+                if len(waiting) != 1:
+                    console.print(
+                        "[red]Error:[/red] "
+                        + (
+                            "This task is not waiting for approval of a tool call."
+                            if not waiting
+                            else "Several steps are waiting; choose one with --step."
+                        )
+                    )
+                    raise typer.Exit(1)
+                step = waiting[0]["id"]
+            elif len(step) < 36:
+                resp_s = client.get(f"/v1/tasks/{task_id}")
+                resp_s.raise_for_status()
+                for s in resp_s.json().get("steps", []):
+                    if s["id"].startswith(step):
+                        step = s["id"]
+                        break
 
-                resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/approve", json={"reason": None})
-                resp.raise_for_status()
-                console.print(f"[green]Task step approved:[/green] {step[:8]}")
-            else:
-                resp = client.post(f"/v1/tasks/{task_id}/plan/approve")
-                resp.raise_for_status()
-                console.print(f"[green]Task plan approved:[/green] {task_id[:8]}")
+            resp = client.post(f"/v1/tasks/{task_id}/steps/{step}/approve", json={"reason": None})
+            resp.raise_for_status()
+            console.print(f"[green]Task step approved:[/green] {step[:8]}")
+        except typer.Exit:
+            raise
         except Exception as e:
             _handle_api_error(e)
 

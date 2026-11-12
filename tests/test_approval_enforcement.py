@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from _agent_helpers import ScriptedModel, text_reply
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -51,8 +52,12 @@ def env(tmp_path):
     )
     tool = CountingWriteTool()
     app.state.task_queue._tool_executor._registry.register(tool)
+    # What the "model" says once a tool call is settled; the tests never need more than a few.
+    model = ScriptedModel(*[text_reply("done") for _ in range(5)])
+    app.state.model_router.complete = model.complete
     with TestClient(app) as client:
         client.headers["Authorization"] = "Bearer test-token"
+        client.model = model  # type: ignore[attr-defined]
         yield client, UnitOfWork(db_path), tool
 
 
@@ -79,6 +84,15 @@ async def _paused_step(
             tool_name="counting_write",
             input_json="{}",
             status="waiting_for_approval",
+            tool_call_id="call_1",
+        )
+        # The conversation the loop would have stored before pausing.
+        await repos.tasks.append_message(task_id, role="system", content="rules")
+        await repos.tasks.append_message(task_id, role="user", content="write")
+        await repos.tasks.append_message(
+            task_id,
+            role="assistant",
+            tool_calls=[{"id": "call_1", "name": "counting_write", "arguments": {}}],
         )
         request_id = None
         if with_request:
@@ -248,14 +262,18 @@ def test_already_consumed_approval_is_rejected(env):
     assert tool.calls == 0
 
 
-def test_valid_denial_fails_task_without_execution(env):
+def test_valid_denial_is_reported_to_the_model_and_never_executes(env):
     client, uow, tool = env
     task_id, step_id, request_id = run(_paused_step(uow))
 
     resp = deny(client, task_id, step_id)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "failed"
-    assert run(_state(uow, task_id, step_id, request_id)) == ("failed", "failed", "denied")
+    assert resp.json()["status"] == "skipped"
+    wait_for_status(client, task_id, "completed")  # the model got to answer
+    assert run(_state(uow, task_id, step_id, request_id)) == ("completed", "skipped", "denied")
+    told = client.model.requests[0].messages[-1]
+    assert (told.role, told.tool_call_id) == ("tool", "call_1")
+    assert told.content == "Not run: the user denied this call. Reason: no"
 
     # The decision is final: neither a second denial nor a late approval is accepted.
     assert deny(client, task_id, step_id).status_code == 409
@@ -287,66 +305,6 @@ def test_list_approvals_returns_only_pending_requests(env):
     resp = client.get("/v1/approvals")
     assert resp.status_code == 200
     assert resp.json() == []
-
-
-# --- Plan approvals --------------------------------------------------------------
-
-
-async def _waiting_plan(
-    uow: UnitOfWork, request_status: str | None = "pending"
-) -> tuple[str, str | None]:
-    async with uow.begin() as unit:
-        repos = unit.repositories
-        project_id = await repos.projects.insert(name=f"p-{uuid4()}")
-        task_id = await repos.tasks.insert(
-            title="T",
-            user_request="plan",
-            project_id=project_id,
-            status="waiting_for_plan_approval",
-        )
-        # A native (tool-less) step so the worker can finish the task without an LLM.
-        await repos.tasks.insert_step(task_id=task_id, step_index=0, title="Think")
-        request_id = None
-        if request_status:
-            request_id = await repos.approvals.insert(
-                task_id=task_id,
-                action_type="plan",
-                risk_level="medium",
-                summary="Approve plan",
-                action_json="{}",
-                action_hash="h",
-                status=request_status,
-            )
-    return task_id, request_id
-
-
-def test_valid_plan_approval_queues_execution(env):
-    client, uow, _ = env
-    task_id, request_id = run(_waiting_plan(uow))
-    assert client.post(f"/v1/tasks/{task_id}/plan/approve").status_code == 200
-    wait_for_status(client, task_id, "completed")
-
-    async def request_status():
-        async with uow.begin() as unit:
-            return (await unit.repositories.approvals.get(request_id))["status"]
-
-    assert run(request_status()) == "approved"
-    # Approving again is not possible once the task left plan approval.
-    assert client.post(f"/v1/tasks/{task_id}/plan/approve").status_code == 400
-
-
-def test_plan_approval_without_request_is_rejected(env):
-    client, uow, _ = env
-    task_id, _ = run(_waiting_plan(uow, request_status=None))
-    assert client.post(f"/v1/tasks/{task_id}/plan/approve").status_code == 409
-    assert client.get(f"/v1/tasks/{task_id}").json()["status"] == "waiting_for_plan_approval"
-
-
-def test_plan_approval_with_denied_request_is_rejected(env):
-    client, uow, _ = env
-    task_id, _ = run(_waiting_plan(uow, request_status="denied"))
-    assert client.post(f"/v1/tasks/{task_id}/plan/approve").status_code == 409
-    assert client.get(f"/v1/tasks/{task_id}").json()["status"] == "waiting_for_plan_approval"
 
 
 # --- Resume / cancel guards ------------------------------------------------------
