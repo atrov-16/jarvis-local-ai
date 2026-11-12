@@ -15,6 +15,24 @@ Line = tuple[str, str]
 
 
 def describe_call(tool_name: str | None, input_json: str | None) -> list[Line]:
+    """The labelled lines for a call. Control characters in the model's text are shown as
+    escapes such as `\\x1b`, never passed to the terminal, which could use them to redraw the
+    preview as something other than what is stored and about to be approved."""
+    return [(kind, _visible(text)) for kind, text in _describe(tool_name, input_json)]
+
+
+def _visible(text: str) -> str:
+    return "".join(ch if ch.isprintable() else _escape(ch) for ch in text)
+
+
+def _escape(ch: str) -> str:
+    code = ord(ch)
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def _describe(tool_name: str | None, input_json: str | None) -> list[Line]:
     if not input_json:
         return [("meta", "(no arguments)")]
     try:

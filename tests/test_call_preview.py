@@ -91,3 +91,21 @@ def test_a_patch_with_unexpected_shape_falls_back_to_listing_arguments():
     lines = describe_call("patch_file", json.dumps({"path": "a", "hunks": "oops"}))
 
     assert "path: a" in texts(lines) and "hunks: oops" in texts(lines)
+
+
+def test_control_characters_in_arguments_are_shown_not_sent_to_the_terminal() -> None:
+    # A model can put escape sequences in a call's arguments (e.g. "erase line, cursor to column
+    # 1") so that a terminal shows different text from what is stored and about to be approved.
+    # The preview must make them visible instead of emitting them.
+    hostile = "rm\x1b[2K\x1b[1G\x07\x7f\u009b"
+    calls = [
+        ("generic_command", {"args": ["rm", "-rf", "/", hostile]}),
+        ("write_file", {"path": f"a{hostile}", "content": f"x\n{hostile}"}),
+        ("patch_file", {"path": hostile, "hunks": [{"search": hostile, "replace": hostile}]}),
+        ("custom", {hostile: hostile}),
+    ]
+    for tool, args in calls:
+        for _kind, text in describe_call(tool, json.dumps(args)):
+            assert all(ch == "\n" or (ch.isprintable()) for ch in text), (tool, text)
+    shown = " ".join(t for _k, t in describe_call("custom", json.dumps({"k": "a\x1b[2Kb"})))
+    assert shown == "k: a\\x1b[2Kb"
