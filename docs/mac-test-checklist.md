@@ -12,4 +12,4 @@ by hand on a Mac.
 
 ## Added during Phase 17 (agent loop)
 
-None yet.
+None. Phase 17 added no macos/posix-marked tests (Windows skips stayed at 37, same as at `d25e5b3`).
