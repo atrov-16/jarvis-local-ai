@@ -164,7 +164,7 @@ class ReflectionService:
         LOG.info("ReflectionService stopped.")
 
     async def _listener_loop(self) -> None:
-        subscription = self._event_bus.subscribe(max_queue_size=100)
+        subscription = self._event_bus.subscribe(max_queue_size=100, name="reflection")
         try:
             while not self._stop_event.is_set():
                 event = await subscription.get()

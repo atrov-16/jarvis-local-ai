@@ -101,7 +101,7 @@ class TaskQueue:
         LOG.info("TaskQueue worker stopped.")
 
     async def _event_listener_loop(self) -> None:
-        subscription = self._event_bus.subscribe(max_queue_size=1000)
+        subscription = self._event_bus.subscribe(max_queue_size=1000, name="task-queue")
         try:
             while not self._stop_event.is_set():
                 try:

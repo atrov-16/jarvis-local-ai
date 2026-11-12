@@ -62,7 +62,7 @@ from jarvis.config.secrets import (
     SecretStorageError,
     tokens_match,
 )
-from jarvis.core.event_bus import EventBus
+from jarvis.core.event_bus import EventBus, SubscriptionClosedError
 from jarvis.core.orphan_recovery import OrphanRecoveryService
 from jarvis.core.process_registry import ProcessRegistryService
 from jarvis.core.recovery import SystemRecoveryService
@@ -863,11 +863,15 @@ def create_app(
     async def events(websocket: WebSocket) -> None:
         if not await authenticate_websocket(websocket, jarvis_config, secrets):
             return
-        subscription = bus.subscribe()
+        # A client that cannot keep up is disconnected rather than silently missing events:
+        # it reconnects and catches up (GET /v1/tasks/{id}/events) from what it last saw.
+        subscription = bus.subscribe(name="websocket", on_overflow="disconnect")
         try:
             while True:
                 event = await subscription.get()
                 await websocket.send_json(event.model_dump(mode="json"))
+        except SubscriptionClosedError:
+            await websocket.close(code=1013, reason="Too slow: events were dropped; reconnect.")
         finally:
             await subscription.close()
 
