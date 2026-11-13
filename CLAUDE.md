@@ -11,30 +11,23 @@ switching machines; pull when starting.
 
 ## Where things stand (as of 2026-11-13)
 
-- `main` is at `d25e5b3`: Phase 16 is merged. GitHub CI passed on Windows and macOS at
-  `d25e5b3`, which is what cleared the merge. Phase 17 work is on branch
-  `phase16/checkpoint-paused` (pushed, draft PR #1). Don't merge that PR into `main` until CI is
-  green on both platforms.
-- Windows suite at `d25e5b3`: 776 passed, 37 skipped (the skips are macOS/POSIX-only tests).
+- `main` is at `7829f08`: Phases 16 and 17 are merged (PR #1). GitHub CI is green on Windows and
+  macOS at `7829f08`. Phase 18 is in progress on `phase18/approval-tiers` (draft PR to `main`);
+  merge it once CI is green on both platforms.
+- Windows suite at `7829f08`: 824 passed, 37 skipped (the skips are macOS/POSIX-only tests).
   No local macOS run since Phase 17 began; CI is the only macOS signal.
-- CI exists: `.github/workflows/ci.yml` (Windows and macOS, Python 3.12 and 3.13).
+- CI: `.github/workflows/ci.yml` (Windows and macOS, Python 3.12 and 3.13).
 - ruff and mypy are held at the baseline in `.github/static-analysis-baseline.json`
-  (232 / 106 at `d25e5b3`). Stay at or below it, and lower the numbers when you fix findings.
+  (230 / 106 at `7829f08`). Stay at or below it, and lower the numbers when you fix findings.
 - Platform-specific tests use the markers in `tests/_platforms.py` (`windows`, `macos`, `posix`).
   macOS/POSIX-marked tests added since the last Mac run are listed in
   `docs/mac-test-checklist.md`.
-- Phase 17 (the observe-act agent loop): done, on `phase16/checkpoint-paused` (PR #1, ready for
-  review, not merged; merge once CI is green on both platforms). Slices: 1 native tool calling,
-  2 non-blocking EventBus, 3 migration 0016, 4 the loop (`jarvis/tasks/agent_loop.py` replaced the
-  planner; no plan approval; a denied or failed tool call is reported to the model instead of
-  failing the task; `final_answer` and `/summary` coexist; defaults 15 turns / 5 calls per turn in
-  `TasksConfig`), 5 the client surface: `final_answer`, step `tool_call_id`/`risk_level`/full
-  `input_json` in responses; task events published on the bus only after commit
-  (`UnitOfWork(on_commit=...)`, `jarvis/tasks/event_relay.py`, each with a `seq`);
-  `GET /v1/tasks/{id}/events?since=` for catch-up; one decision path
-  (`jarvis/tasks/decisions.py`) used by the step routes, `/v1/approvals/{id}/approve|deny` and
-  bulk; the CLI prints a call's args (a diff for `patch_file`) before approving or denying.
-  Next is Phase 18 (approval tiers). Plan: `docs/gui-and-agent-loop-plan.md`.
+- The agent loop (Phase 17) is in `jarvis/tasks/agent_loop.py`: the model calls tools turn by
+  turn; a denied or failed call is reported back to the model. Every approve or deny goes through
+  `jarvis/tasks/decisions.py`. Task events reach clients through `jarvis/tasks/event_relay.py`
+  after the transaction commits. Review findings still open: `docs/phase17-review.md`.
+- Phase 18 (approval tiers: Auto, Batch, Always ask): in progress. Decisions and slices are in
+  `docs/gui-and-agent-loop-plan.md`. Phase 19 is the GUI, Phase 20 polish.
 - The portability list below was written before Phase 16 and has not been re-audited. Check each
   item against the code before working on it.
 
@@ -42,8 +35,7 @@ switching machines; pull when starting.
 
 Work in this order:
 
-1. Run the full suite on macOS; fix failures. Merge `phase16/checkpoint-paused` into `main` once
-   green on both.
+1. Run the full suite on macOS; fix failures.
 2. Keep CI green on both platforms (pytest, ruff and mypy on every push).
 3. Known portability gaps:
    - **Line endings.** `write_file` / `patch_file` in `jarvis/tools/filesystem.py` use
