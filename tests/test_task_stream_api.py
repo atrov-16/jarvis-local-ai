@@ -17,6 +17,7 @@ from jarvis.api.http import create_app
 from jarvis.config.models import JarvisConfig, MemoryConfig
 from jarvis.config.secrets import SecretManager
 from jarvis.core.event_bus import EventBus
+from jarvis.models.schemas import ToolCall
 
 
 @pytest.fixture
@@ -233,6 +234,68 @@ def test_a_failed_call_is_published_as_a_completed_call_that_did_not_succeed(
 
     done = [e["payload"] for e in published if e["type"] == "task.tool_call_completed"]
     assert len(done) == 1 and done[0]["success"] is False and done[0]["error"]
+
+
+def proposed_and_done(published, task_id):
+    proposed = {
+        e["payload"]["tool_call_id"]
+        for e in published
+        if e["type"] == "task.tool_call_proposed" and e["payload"]["task_id"] == task_id
+    }
+    done = {
+        e["payload"]["tool_call_id"]: e["payload"]
+        for e in published
+        if e["type"] == "task.tool_call_completed" and e["payload"]["task_id"] == task_id
+    }
+    return proposed, done
+
+
+def test_a_call_with_bad_arguments_gets_a_terminal_event(client, app, tools, published):
+    bad = ToolCall(
+        id="call_bad",
+        name="echo",
+        arguments={},
+        error="The arguments were not valid JSON.",
+        raw_arguments="{oops",
+    )
+    script(app, tool_reply(bad), text_reply("I will fix the arguments."))
+    task_id = client.post("/v1/tasks", json={"user_request": "Try"}).json()["id"]
+    wait_for(client, task_id, lambda t: t["status"] == "completed")
+    time.sleep(0.3)
+
+    proposed, done = proposed_and_done(published, task_id)
+    assert proposed == {"call_bad"}
+    assert done["call_bad"]["success"] is False and done["call_bad"]["error"]
+
+
+def test_a_call_over_the_per_turn_limit_gets_a_terminal_event(client, app, tools, published):
+    limit = app.state.task_queue._agent_loop._max_tool_calls_per_turn
+    calls = [("echo", {"text": str(i)}, f"call_{i}") for i in range(limit + 1)]
+    script(app, tool_reply(*calls), text_reply("Done."))
+    task_id = client.post("/v1/tasks", json={"user_request": "Many"}).json()["id"]
+    wait_for(client, task_id, lambda t: t["status"] == "completed")
+    time.sleep(0.3)
+
+    proposed, done = proposed_and_done(published, task_id)
+    assert set(done) == proposed  # no call is left at "proposed"
+    assert done[f"call_{limit}"]["success"] is False
+    assert all(done[f"call_{i}"]["success"] is True for i in range(limit))
+
+
+def test_a_denied_call_gets_a_terminal_event(client, app, tools, published):
+    script(app, tool_reply(("write", {"text": "a"}, "call_1")), text_reply("Understood."))
+    task_id = client.post("/v1/tasks", json={"user_request": "Write a"}).json()["id"]
+    task = wait_for(client, task_id, waiting_step)
+    step_id = next(s["id"] for s in task["steps"] if s["status"] == "waiting_for_approval")
+    deny = client.post(f"/v1/tasks/{task_id}/steps/{step_id}/deny", json={"reason": "not now"})
+    assert deny.status_code == 200
+    wait_for(client, task_id, lambda t: t["status"] == "completed")
+    time.sleep(0.3)
+
+    proposed, done = proposed_and_done(published, task_id)
+    assert proposed == {"call_1"}
+    assert done["call_1"]["success"] is False
+    assert "denied" in done["call_1"]["error"]
 
 
 # --- Catch-up: GET /v1/tasks/{id}/events?since= -------------------------------------------------

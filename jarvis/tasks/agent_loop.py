@@ -381,6 +381,17 @@ class AgentLoop:
                     message=f"Model requested: {step_title(call)}",
                     payload={"tool_call_id": call.id, "tool_name": call.name, "status": status},
                 )
+                if error is not None:
+                    # This call will never run: close it for clients (the relay publishes
+                    # `step_failed` as a completed call with success=False).
+                    await tasks.insert_event(
+                        task_id=task_id,
+                        step_id=step_id,
+                        event_type="step_failed",
+                        message=f"Call not run: {error}",
+                        payload={"error": error, "tool_call_id": call.id, "tool_name": call.name},
+                        severity="error" if status == "failed" else "warning",
+                    )
         return True
 
     @staticmethod

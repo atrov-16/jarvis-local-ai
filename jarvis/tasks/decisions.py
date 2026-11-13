@@ -89,6 +89,7 @@ async def decide_step(
     if request_id is not None and request["id"] != request_id:
         raise DecisionError(409, "A newer approval request exists for this step.")
     tasks = unit.repositories.tasks
+    denied_step: dict[str, Any] | None = None
 
     if approve:
         # A pending request is approved here; one already approved elsewhere but not yet
@@ -118,6 +119,7 @@ async def decide_step(
         error_msg = "the user denied this call."
         if reason:
             error_msg += f" Reason: {reason}"
+        denied_step = await tasks.get_step(step_id)
         if not await tasks.transition_step(
             step_id, "skipped", from_statuses=("waiting_for_approval",), error=error_msg
         ):
@@ -137,6 +139,23 @@ async def decide_step(
         payload={"reason": reason},
         correlation_id=request["id"],
     )
+    if not approve:
+        assert denied_step is not None
+        # The call will never run: close it for clients (the relay publishes `step_failed` as a
+        # completed call with success=False).
+        await tasks.insert_event(
+            task_id=task_id,
+            step_id=step_id,
+            event_type="step_failed",
+            message=f"Call not run: {error_msg}",
+            payload={
+                "error": error_msg,
+                "tool_call_id": denied_step.get("tool_call_id"),
+                "tool_name": denied_step.get("tool_name"),
+            },
+            severity="warning",
+            correlation_id=request["id"],
+        )
     await tasks.insert_event(
         task_id=task_id,
         step_id=step_id,

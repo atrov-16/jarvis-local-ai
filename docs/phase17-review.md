@@ -58,7 +58,7 @@ to the drop policy.
 
 ## Open: spec (P2/P3)
 
-6. **P2: calls that never run emit no terminal event**, so a client sees them stuck at "proposed"
+6. **P2: calls that never run emit no terminal event** (fixed in Phase 18 slice 1: they now insert `step_failed`), so a client sees them stuck at "proposed"
    (`jarvis/tasks/agent_loop.py:379` `event_type="tool_call_proposed",`; `decisions.py` sets a denied
    call to `skipped` with only `approval_denied` / `status_change`; `BUS_EVENT_FOR` in
    `jarvis/tasks/event_relay.py:7` relays none of those as a call-completed event). Calls with bad
